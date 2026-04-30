@@ -527,6 +527,7 @@ function App() {
     }
 
     const currentClassId = sourceReserved.classId;
+    alert('Current classId: ' + currentClassId);
     const sectionLetter = currentClassId.slice(-1);
     let targetClassId;
 
