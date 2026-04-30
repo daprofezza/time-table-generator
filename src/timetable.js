@@ -26,6 +26,29 @@ function scoreSlot({ assignment, day, session, currentEntries, classLoads, staff
   return (assignmentDayCount === 0 ? 12 : 5 - assignmentDayCount * 2) - classDayLoad * 0.7 - staffDayLoad * 0.7 - adjacentPenalty - assignmentTotal * 0.03;
 }
 
+function normalizeReservedSlots(slots) {
+  if (!Array.isArray(slots)) {
+    return [];
+  }
+
+  const unique = new Set();
+
+  return slots.flatMap((slot) => {
+    const session = Number(slot?.session);
+    if (!slot || !DAYS.includes(slot.day) || !SESSIONS.includes(session)) {
+      return [];
+    }
+
+    const key = `${slot.day}:${session}`;
+    if (unique.has(key)) {
+      return [];
+    }
+
+    unique.add(key);
+    return [{ day: slot.day, session }];
+  });
+}
+
 export function generateTimetable({ classes, staff, assignments }) {
   const entries = [];
   const errors = [];
@@ -39,12 +62,20 @@ export function generateTimetable({ classes, staff, assignments }) {
   const classLookup = new Map(classes.map((item) => [item.id, item]));
 
   for (const member of staff) {
+    const reservedSlots = normalizeReservedSlots(member.reservedSlots);
+    staffHours.set(member.id, reservedSlots.length);
+
+    for (const slot of reservedSlots) {
+      staffBusy.add(`${member.id}:${slot.day}:${slot.session}`);
+      staffLoads.set(`${member.id}:${slot.day}`, (staffLoads.get(`${member.id}:${slot.day}`) ?? 0) + 1);
+    }
+
     const totalAssigned = assignments
       .filter((assignment) => assignment.staffId === member.id)
-      .reduce((sum, assignment) => sum + Number(assignment.weeklyHours || 0), 0);
+      .reduce((sum, assignment) => sum + Number(assignment.weeklyHours || 0), 0) + reservedSlots.length;
 
     if (totalAssigned > member.maxHours) {
-      errors.push(`${member.shortName} exceeds ${member.maxHours} hours with ${totalAssigned} assigned.`);
+      errors.push(`${member.shortName} exceeds ${member.maxHours} hours with reserved time included (${totalAssigned}).`);
     }
   }
 
