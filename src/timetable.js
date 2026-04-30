@@ -4,8 +4,8 @@ export const SESSION_TIMES = [
   '01:45-02:40',
   '02:40-03:35',
   '03:35-04:30',
-  '04:40-05:35',
-  '05:35-06:30',
+  '04:45-05:40',
+  '05:40-06:30',
 ];
 
 function scoreSlot({ assignment, day, session, currentEntries, classLoads, staffLoads, subjectSpread }) {
