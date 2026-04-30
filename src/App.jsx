@@ -526,34 +526,28 @@ function App() {
       return;
     }
 
-    const currentClassId = sourceReserved.classId;
-    alert('Current classId: ' + currentClassId);
-    const sectionLetter = currentClassId.slice(-1);
-    let targetClassId;
-
-    if (sectionLetter === 'A') {
-      targetClassId = currentClassId.replace('A', 'B');
-    } else if (sectionLetter === 'B') {
-      targetClassId = currentClassId.replace('B', 'A');
-    } else {
-      setStatusMessage('Cannot determine other section for this class.');
+    const sourceClass = data.classes.find((c) => c.id === sourceReserved.classId);
+    if (!sourceClass) {
+      setStatusMessage('Source class not found.');
       return;
     }
 
-    const targetClassExists = data.classes.some((c) => c.id === targetClassId);
-    if (!targetClassExists) {
-      setStatusMessage(`Class ${targetClassId} does not exist. Add it first.`);
+    const otherSection = sourceClass.section === 'A' ? 'B' : 'A';
+    const targetClass = data.classes.find((c) => c.year === sourceClass.year && c.section === otherSection);
+
+    if (!targetClass) {
+      setStatusMessage(`Section ${otherSection} for ${sourceClass.year} year does not exist. Add it first.`);
       return;
     }
 
     const alreadyExists = data.reservedClasses.some((item) => (
-      item.classId === targetClassId &&
+      item.classId === targetClass.id &&
       item.day === sourceReserved.day &&
       item.session === sourceReserved.session
     ));
 
     if (alreadyExists) {
-      setStatusMessage(`Reserved slot already exists for ${targetClassId} at this time.`);
+      setStatusMessage(`Reserved slot already exists for ${targetClass.label} at this time.`);
       return;
     }
 
@@ -563,14 +557,14 @@ function App() {
         ...current.reservedClasses,
         {
           id: createId('rsv'),
-          classId: targetClassId,
+          classId: targetClass.id,
           day: sourceReserved.day,
           session: sourceReserved.session,
           subjectName: sourceReserved.subjectName,
           staffName: sourceReserved.staffName,
         },
       ],
-    }), `Reserved slot added for ${targetClassId}.`);
+    }), `Reserved slot added for ${targetClass.label}.`);
   }
 
   function updateReservedHours() {
