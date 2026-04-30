@@ -333,36 +333,65 @@ function App() {
   function addReservedClass(event) {
     event.preventDefault();
 
-    if (!reservedClassForm.classId || !reservedClassForm.subjectName.trim() || !reservedClassForm.staffName.trim()) {
-      setStatusMessage('Reserved class needs class, subject, and staff name.');
+    if (!reservedClassForm.classId || !reservedClassForm.subjectName.trim()) {
+      setStatusMessage('Reserved class needs class and subject.');
       return;
     }
 
-    const duplicate = data.reservedClasses.some((item) => (
-      item.classId === reservedClassForm.classId &&
-      item.day === reservedClassForm.day &&
-      item.session === Number(reservedClassForm.session)
-    ));
+    const selectedClass = classLookup.get(reservedClassForm.classId);
+    if (!selectedClass) {
+      setStatusMessage('Select a valid class.');
+      return;
+    }
 
-    if (duplicate) {
+    const staffName = reservedClassForm.staffName.trim() || 'External';
+    const newReserved = {
+      id: createId('rsv'),
+      classId: reservedClassForm.classId,
+      day: reservedClassForm.day,
+      session: Number(reservedClassForm.session),
+      subjectName: reservedClassForm.subjectName.trim(),
+      staffName,
+    };
+
+    const reservedClassesToAdd = [newReserved];
+
+    if (selectedClass.section === 'A') {
+      const sectionBClassId = `${selectedClass.year}-B`;
+      const sectionBClass = classLookup.get(sectionBClassId);
+
+      if (sectionBClass) {
+        const duplicateB = data.reservedClasses.some((item) => (
+          item.classId === sectionBClassId &&
+          item.day === reservedClassForm.day &&
+          item.session === Number(reservedClassForm.session)
+        ));
+
+        if (!duplicateB) {
+          reservedClassesToAdd.push({
+            id: createId('rsv'),
+            classId: sectionBClassId,
+            day: reservedClassForm.day,
+            session: Number(reservedClassForm.session),
+            subjectName: reservedClassForm.subjectName.trim(),
+            staffName,
+          });
+        }
+      }
+    }
+
+    const existingIds = new Set(data.reservedClasses.map((item) => `${item.classId}:${item.day}:${item.session}`));
+    const uniqueNewReserved = reservedClassesToAdd.filter((item) => !existingIds.has(`${item.classId}:${item.day}:${item.session}`));
+
+    if (uniqueNewReserved.length === 0) {
       setStatusMessage('That class slot is already reserved.');
       return;
     }
 
     updateBuilder((current) => ({
       ...current,
-      reservedClasses: [
-        ...current.reservedClasses,
-        {
-          id: createId('rsv'),
-          classId: reservedClassForm.classId,
-          day: reservedClassForm.day,
-          session: Number(reservedClassForm.session),
-          subjectName: reservedClassForm.subjectName.trim(),
-          staffName: reservedClassForm.staffName.trim(),
-        },
-      ],
-    }), 'Reserved class slot added.');
+      reservedClasses: [...current.reservedClasses, ...uniqueNewReserved],
+    }), uniqueNewReserved.length === 2 ? 'Reserved class slots added for both sections.' : 'Reserved class slot added.');
     setReservedClassForm((current) => ({ ...DEFAULT_RESERVED_CLASS_FORM, classId: current.classId }));
   }
 
@@ -778,8 +807,8 @@ function App() {
                     <input value={reservedClassForm.subjectName} onChange={(event) => setReservedClassForm((current) => ({ ...current, subjectName: event.target.value }))} />
                   </label>
                   <label className="span-two">
-                    Staff name
-                    <input value={reservedClassForm.staffName} onChange={(event) => setReservedClassForm((current) => ({ ...current, staffName: event.target.value }))} />
+                    Staff name (optional)
+                    <input placeholder="Leave empty for external/other dept" value={reservedClassForm.staffName} onChange={(event) => setReservedClassForm((current) => ({ ...current, staffName: event.target.value }))} />
                   </label>
                 </div>
                 <button className="primary-button small-button" type="submit">Reserve class slot</button>
