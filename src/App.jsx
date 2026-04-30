@@ -526,81 +526,50 @@ function App() {
       return;
     }
 
-    const sourceClass = classLookup.get(sourceReserved.classId);
-    if (!sourceClass) {
-      setStatusMessage('Class not found.');
+    const currentClassId = sourceReserved.classId;
+    const sectionLetter = currentClassId.slice(-1);
+    let targetClassId;
+
+    if (sectionLetter === 'A') {
+      targetClassId = currentClassId.replace('A', 'B');
+    } else if (sectionLetter === 'B') {
+      targetClassId = currentClassId.replace('B', 'A');
+    } else {
+      setStatusMessage('Cannot determine other section for this class.');
       return;
     }
 
-    if (sourceClass.section === 'A') {
-      const targetClassId = `${sourceClass.year}-B`;
-      const targetClassExists = classLookup.has(targetClassId);
-
-      if (!targetClassExists) {
-        setStatusMessage('Section B class does not exist for this year.');
-        return;
-      }
-
-      const alreadyExists = data.reservedClasses.some((item) => (
-        item.classId === targetClassId &&
-        item.day === sourceReserved.day &&
-        item.session === sourceReserved.session
-      ));
-
-      if (alreadyExists) {
-        setStatusMessage('Reserved slot already exists for Section B at this time.');
-        return;
-      }
-
-      updateBuilder((current) => ({
-        ...current,
-        reservedClasses: [
-          ...current.reservedClasses,
-          {
-            id: createId('rsv'),
-            classId: targetClassId,
-            day: sourceReserved.day,
-            session: sourceReserved.session,
-            subjectName: sourceReserved.subjectName,
-            staffName: sourceReserved.staffName,
-          },
-        ],
-      }), `Reserved slot added for ${targetClassId}.`);
-    } else {
-      const targetClassId = `${sourceClass.year}-A`;
-      const targetClassExists = classLookup.has(targetClassId);
-
-      if (!targetClassExists) {
-        setStatusMessage('Section A class does not exist for this year.');
-        return;
-      }
-
-      const alreadyExists = data.reservedClasses.some((item) => (
-        item.classId === targetClassId &&
-        item.day === sourceReserved.day &&
-        item.session === sourceReserved.session
-      ));
-
-      if (alreadyExists) {
-        setStatusMessage('Reserved slot already exists for Section A at this time.');
-        return;
-      }
-
-      updateBuilder((current) => ({
-        ...current,
-        reservedClasses: [
-          ...current.reservedClasses,
-          {
-            id: createId('rsv'),
-            classId: targetClassId,
-            day: sourceReserved.day,
-            session: sourceReserved.session,
-            subjectName: sourceReserved.subjectName,
-            staffName: sourceReserved.staffName,
-          },
-        ],
-      }), `Reserved slot added for ${targetClassId}.`);
+    const targetClassExists = data.classes.some((c) => c.id === targetClassId);
+    if (!targetClassExists) {
+      setStatusMessage(`Class ${targetClassId} does not exist. Add it first.`);
+      return;
     }
+
+    const alreadyExists = data.reservedClasses.some((item) => (
+      item.classId === targetClassId &&
+      item.day === sourceReserved.day &&
+      item.session === sourceReserved.session
+    ));
+
+    if (alreadyExists) {
+      setStatusMessage(`Reserved slot already exists for ${targetClassId} at this time.`);
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      reservedClasses: [
+        ...current.reservedClasses,
+        {
+          id: createId('rsv'),
+          classId: targetClassId,
+          day: sourceReserved.day,
+          session: sourceReserved.session,
+          subjectName: sourceReserved.subjectName,
+          staffName: sourceReserved.staffName,
+        },
+      ],
+    }), `Reserved slot added for ${targetClassId}.`);
   }
 
   function updateReservedHours() {
