@@ -480,6 +480,15 @@ function App() {
     setStatusMessage('Planner cleared.');
   }
 
+  function clearEntries() {
+    if (typeof window !== 'undefined' && !window.confirm('Clear all timetable entries? Classes, subjects, staff, and assignments will be kept.')) {
+      return;
+    }
+
+    updateBuilder((current) => ({ ...current, entries: [] }), 'Timetable cleared.');
+    setIssues([]);
+  }
+
   function removeClass(classId) {
     updateBuilder((current) => ({
       ...current,
@@ -609,7 +618,8 @@ function App() {
           <button className="primary-button" onClick={generate}>Generate timetable</button>
           <button className="secondary-button" onClick={saveCloud}>Save</button>
           <button className="secondary-button" onClick={loadCloud}>Load</button>
-          <button className="ghost-button" onClick={clearPlanner}>Clear</button>
+          <button className="ghost-button" onClick={clearEntries}>Clear entries</button>
+          <button className="ghost-button" onClick={clearPlanner}>Clear all</button>
         </div>
       </header>
 
