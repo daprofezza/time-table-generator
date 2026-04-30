@@ -13,13 +13,19 @@ const firebaseConfig = {
 const isFirebaseConfigured = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
 
 let firestore = null;
+let firebaseStatus = 'Firebase env not set. Using browser-only storage.';
 
 if (isFirebaseConfigured) {
-  const app = initializeApp(firebaseConfig);
-  firestore = getFirestore(app);
+  try {
+    const app = initializeApp(firebaseConfig);
+    firestore = getFirestore(app);
+    firebaseStatus = 'Firebase ready.';
+  } catch (error) {
+    firebaseStatus = error instanceof Error ? error.message : 'Firebase failed to initialize.';
+  }
 }
 
-export { isFirebaseConfigured };
+export { firebaseStatus, isFirebaseConfigured };
 
 export async function saveTimetableToCloud(data) {
   if (!firestore) {

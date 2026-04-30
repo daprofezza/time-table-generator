@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { isFirebaseConfigured, loadTimetableFromCloud, saveTimetableToCloud } from './firebase';
+import { firebaseStatus, loadTimetableFromCloud, saveTimetableToCloud } from './firebase';
 import { initialData } from './sampleData';
 import { DAYS, SESSIONS, SESSION_TIMES, generateTimetable, groupEntries, groupEntriesByStaff } from './timetable';
 
@@ -9,14 +9,33 @@ function createId(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizeData(candidate) {
+  if (!candidate || typeof candidate !== 'object') {
+    return initialData;
+  }
+
+  return {
+    classes: Array.isArray(candidate.classes) ? candidate.classes : initialData.classes,
+    subjects: Array.isArray(candidate.subjects) ? candidate.subjects : initialData.subjects,
+    staff: Array.isArray(candidate.staff) ? candidate.staff : initialData.staff,
+    assignments: Array.isArray(candidate.assignments) ? candidate.assignments : initialData.assignments,
+    entries: Array.isArray(candidate.entries) ? candidate.entries : initialData.entries,
+    notes: Array.isArray(candidate.notes) ? candidate.notes : initialData.notes,
+  };
+}
+
 function loadInitialState() {
+  if (typeof window === 'undefined') {
+    return initialData;
+  }
+
   const stored = window.localStorage.getItem(STORAGE_KEY);
   if (!stored) {
     return initialData;
   }
 
   try {
-    return JSON.parse(stored);
+    return normalizeData(JSON.parse(stored));
   } catch {
     return initialData;
   }
@@ -24,7 +43,7 @@ function loadInitialState() {
 
 function App() {
   const [data, setData] = useState(loadInitialState);
-  const [notes, setNotes] = useState(initialData.notes ?? []);
+  const [notes, setNotes] = useState(loadInitialState().notes ?? []);
   const [classForm, setClassForm] = useState({ year: 'I', section: 'A', department: 'BBA' });
   const [subjectForm, setSubjectForm] = useState({ code: '', shortName: '', name: '' });
   const [staffForm, setStaffForm] = useState({ name: '', shortName: '', maxHours: 18 });
@@ -36,13 +55,23 @@ function App() {
   });
   const [selectedClassId, setSelectedClassId] = useState('all');
   const [selectedStaffId, setSelectedStaffId] = useState(initialData.staff[0].id);
-  const [cloudMessage, setCloudMessage] = useState(
-    isFirebaseConfigured ? 'Firebase ready.' : 'Firebase env not set. Using browser-only storage.',
-  );
+  const [cloudMessage, setCloudMessage] = useState(firebaseStatus);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    }
   }, [data]);
+
+  useEffect(() => {
+    if (!data.staff.some((item) => item.id === selectedStaffId) && data.staff[0]) {
+      setSelectedStaffId(data.staff[0].id);
+    }
+
+    if (selectedClassId !== 'all' && !data.classes.some((item) => item.id === selectedClassId)) {
+      setSelectedClassId('all');
+    }
+  }, [data.classes, data.staff, selectedClassId, selectedStaffId]);
 
   const classLookup = useMemo(() => new Map(data.classes.map((item) => [item.id, item])), [data.classes]);
   const subjectLookup = useMemo(() => new Map(data.subjects.map((item) => [item.id, item])), [data.subjects]);
@@ -126,7 +155,7 @@ function App() {
         return;
       }
 
-      setData(cloudData);
+      setData(normalizeData(cloudData));
       setCloudMessage('Loaded timetable from Firestore.');
     } catch (error) {
       setCloudMessage(error.message);
