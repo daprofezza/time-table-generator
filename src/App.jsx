@@ -396,8 +396,8 @@ function App() {
   }
 
   function generate() {
-    if (!data.assignments.length) {
-      setStatusMessage('Add at least one teaching load first.');
+    if (!data.assignments.length && !data.reservedClasses.length) {
+      setStatusMessage('Add at least one teaching load or reserved class slot first.');
       setIssues([]);
       return;
     }
