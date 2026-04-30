@@ -13,6 +13,7 @@ export function createEmptyData() {
     subjects: [],
     staff: [],
     assignments: [],
+    reservedClasses: [],
     entries: [],
   };
 }

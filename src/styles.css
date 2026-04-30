@@ -283,8 +283,16 @@ h4 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.two-col {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .four-col {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.span-two {
+  grid-column: span 2;
 }
 
 label {
@@ -517,6 +525,7 @@ button:focus {
 @media (max-width: 1200px) {
   .summary-grid,
   .setup-grid,
+  .two-col,
   .three-col,
   .four-col,
   .planning-grid {
@@ -545,10 +554,15 @@ button:focus {
   .hero-actions,
   .summary-grid,
   .setup-grid,
+  .two-col,
   .three-col,
   .four-col,
   .reservation-grid {
     grid-template-columns: 1fr;
+  }
+
+  .span-two {
+    grid-column: auto;
   }
 
   .reservation-grid {

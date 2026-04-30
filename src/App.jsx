@@ -1,13 +1,15 @@
 import React, { Fragment, useEffect, useMemo, useState } from 'react';
-import { firebaseStatus, loadTimetableFromCloud, saveTimetableToCloud } from './firebase';
+import { loadTimetableFromCloud, saveTimetableToCloud } from './firebase';
 import { createEmptyData, STANDARD_CLASSES } from './sampleData';
 import { DAYS, SESSIONS, SESSION_TIMES, generateTimetable, groupEntries, groupEntriesByStaff } from './timetable';
 
-const STORAGE_KEY = 'time-table-generator-data-v2';
+const STORAGE_KEY = 'time-table-generator-data-v3';
 const EMPTY_DATA = createEmptyData();
 const DEFAULT_CLASS_FORM = { year: 'I', section: 'A', department: 'BBA' };
 const DEFAULT_SUBJECT_FORM = { code: '', shortName: '', name: '' };
 const DEFAULT_STAFF_FORM = { name: '', shortName: '', maxHours: 18, reservedSlots: [] };
+const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1 };
+const DEFAULT_RESERVED_CLASS_FORM = { classId: '', day: 'A', session: 1, subjectName: '', staffName: '' };
 
 function createId(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -75,6 +77,21 @@ function normalizeData(candidate) {
           weeklyHours: Number(item.weeklyHours) || 1,
         }))
       : [],
+    reservedClasses: Array.isArray(candidate.reservedClasses)
+      ? candidate.reservedClasses.flatMap((item) => {
+          const session = Number(item?.session);
+          if (!item || !item.classId || !DAYS.includes(item.day) || !SESSIONS.includes(session)) {
+            return [];
+          }
+
+          return [{
+            ...item,
+            session,
+            subjectName: item.subjectName ?? 'Reserved',
+            staffName: item.staffName ?? 'External Staff',
+          }];
+        })
+      : [],
     entries: Array.isArray(candidate.entries)
       ? candidate.entries.map((item) => ({
           ...item,
@@ -103,12 +120,13 @@ function loadInitialState() {
 
 function App() {
   const [data, setData] = useState(loadInitialState);
-  const [statusMessage, setStatusMessage] = useState(firebaseStatus);
+  const [statusMessage, setStatusMessage] = useState('Ready.');
   const [issues, setIssues] = useState([]);
   const [classForm, setClassForm] = useState(DEFAULT_CLASS_FORM);
   const [subjectForm, setSubjectForm] = useState(DEFAULT_SUBJECT_FORM);
   const [staffForm, setStaffForm] = useState(DEFAULT_STAFF_FORM);
-  const [assignmentForm, setAssignmentForm] = useState({ classId: '', subjectId: '', staffId: '', weeklyHours: 1 });
+  const [assignmentForm, setAssignmentForm] = useState(DEFAULT_ASSIGNMENT_FORM);
+  const [reservedClassForm, setReservedClassForm] = useState(DEFAULT_RESERVED_CLASS_FORM);
   const [selectedClassId, setSelectedClassId] = useState('all');
   const [selectedStaffId, setSelectedStaffId] = useState('');
   const [reservedEditorStaffId, setReservedEditorStaffId] = useState('');
@@ -154,6 +172,11 @@ function App() {
         ? current
         : next;
     });
+
+    setReservedClassForm((current) => {
+      const nextClassId = data.classes.some((item) => item.id === current.classId) ? current.classId : (data.classes[0]?.id ?? '');
+      return nextClassId === current.classId ? current : { ...current, classId: nextClassId };
+    });
   }, [data.classes, data.staff, data.subjects]);
 
   useEffect(() => {
@@ -167,7 +190,7 @@ function App() {
   const classEntries = useMemo(() => groupEntries(data.entries), [data.entries]);
   const staffEntries = useMemo(() => groupEntriesByStaff(data.entries), [data.entries]);
 
-  const reservedLookup = useMemo(() => {
+  const reservedStaffLookup = useMemo(() => {
     const reserved = new Set();
     for (const member of data.staff) {
       for (const slot of member.reservedSlots ?? []) {
@@ -188,7 +211,9 @@ function App() {
   const scheduledLoads = useMemo(() => {
     const loads = new Map(data.staff.map((item) => [item.id, 0]));
     for (const entry of data.entries) {
-      loads.set(entry.staffId, (loads.get(entry.staffId) ?? 0) + 1);
+      if (entry.staffId) {
+        loads.set(entry.staffId, (loads.get(entry.staffId) ?? 0) + 1);
+      }
     }
     return loads;
   }, [data.entries, data.staff]);
@@ -216,7 +241,7 @@ function App() {
         ...current,
         classes: [...current.classes, ...STANDARD_CLASSES.filter((item) => !existing.has(item.id))],
       };
-    }, 'Standard I, II, III sections A and B added. Generate timetable after planning.');
+    }, 'Classes added.');
   }
 
   function addClass(event) {
@@ -231,7 +256,7 @@ function App() {
     updateBuilder((current) => ({
       ...current,
       classes: [...current.classes, { id: createId('cls'), year: classForm.year, section: classForm.section, label }],
-    }), 'Class added. Generate timetable after completing setup.');
+    }), 'Class added.');
     setClassForm(DEFAULT_CLASS_FORM);
   }
 
@@ -278,7 +303,7 @@ function App() {
           reservedSlots: normalizeReservedSlots(staffForm.reservedSlots),
         },
       ],
-    }), 'Staff added. Reserved hours are blocked from new allocation.');
+    }), 'Staff added.');
     setStaffForm(DEFAULT_STAFF_FORM);
   }
 
@@ -286,7 +311,7 @@ function App() {
     event.preventDefault();
 
     if (!assignmentForm.classId || !assignmentForm.subjectId || !assignmentForm.staffId) {
-      setStatusMessage('Add classes, subjects, and staff before creating allotments.');
+      setStatusMessage('Class, subject, and staff are required.');
       return;
     }
 
@@ -302,26 +327,68 @@ function App() {
           weeklyHours: Number(assignmentForm.weeklyHours),
         },
       ],
-    }), 'Teaching allotment added.');
+    }), 'Teaching load added.');
+  }
+
+  function addReservedClass(event) {
+    event.preventDefault();
+
+    if (!reservedClassForm.classId || !reservedClassForm.subjectName.trim() || !reservedClassForm.staffName.trim()) {
+      setStatusMessage('Reserved class needs class, subject, and staff name.');
+      return;
+    }
+
+    const duplicate = data.reservedClasses.some((item) => (
+      item.classId === reservedClassForm.classId &&
+      item.day === reservedClassForm.day &&
+      item.session === Number(reservedClassForm.session)
+    ));
+
+    if (duplicate) {
+      setStatusMessage('That class slot is already reserved.');
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      reservedClasses: [
+        ...current.reservedClasses,
+        {
+          id: createId('rsv'),
+          classId: reservedClassForm.classId,
+          day: reservedClassForm.day,
+          session: Number(reservedClassForm.session),
+          subjectName: reservedClassForm.subjectName.trim(),
+          staffName: reservedClassForm.staffName.trim(),
+        },
+      ],
+    }), 'Reserved class slot added.');
+    setReservedClassForm((current) => ({ ...DEFAULT_RESERVED_CLASS_FORM, classId: current.classId }));
   }
 
   function generate() {
     if (!data.assignments.length) {
-      setStatusMessage('Add at least one teaching allotment before generating the timetable.');
+      setStatusMessage('Add at least one teaching load first.');
       setIssues([]);
       return;
     }
 
-    const result = generateTimetable({ classes: data.classes, staff: data.staff, assignments: data.assignments });
+    const result = generateTimetable({
+      classes: data.classes,
+      staff: data.staff,
+      assignments: data.assignments,
+      reservedClasses: data.reservedClasses,
+    });
+
     setData((current) => ({ ...current, entries: result.entries }));
     setIssues(result.errors);
-    setStatusMessage(result.errors.length ? 'Timetable generated with warnings.' : 'Timetable generated successfully.');
+    setStatusMessage(result.errors.length ? 'Generated with warnings.' : 'Timetable generated.');
   }
 
   async function saveCloud() {
     try {
       await saveTimetableToCloud(data);
-      setStatusMessage('Planner saved to Firebase.');
+      setStatusMessage('Saved to Firebase.');
     } catch (error) {
       setStatusMessage(error.message);
     }
@@ -331,20 +398,20 @@ function App() {
     try {
       const cloudData = await loadTimetableFromCloud();
       if (!cloudData) {
-        setStatusMessage('No Firebase timetable document found yet.');
+        setStatusMessage('No Firebase timetable found.');
         return;
       }
 
       setData(normalizeData(cloudData));
       setIssues([]);
-      setStatusMessage('Planner loaded from Firebase.');
+      setStatusMessage('Loaded from Firebase.');
     } catch (error) {
       setStatusMessage(error.message);
     }
   }
 
   function clearPlanner() {
-    if (typeof window !== 'undefined' && !window.confirm('Clear all classes, staff, subjects, allotments, and timetable data?')) {
+    if (typeof window !== 'undefined' && !window.confirm('Clear all planner data?')) {
       return;
     }
 
@@ -358,7 +425,8 @@ function App() {
       ...current,
       classes: current.classes.filter((item) => item.id !== classId),
       assignments: current.assignments.filter((item) => item.classId !== classId),
-    }), 'Class removed. Related allotments cleared.');
+      reservedClasses: current.reservedClasses.filter((item) => item.classId !== classId),
+    }), 'Class removed.');
   }
 
   function removeSubject(subjectId) {
@@ -366,7 +434,7 @@ function App() {
       ...current,
       subjects: current.subjects.filter((item) => item.id !== subjectId),
       assignments: current.assignments.filter((item) => item.subjectId !== subjectId),
-    }), 'Subject removed. Related allotments cleared.');
+    }), 'Subject removed.');
   }
 
   function removeStaff(staffId) {
@@ -374,19 +442,26 @@ function App() {
       ...current,
       staff: current.staff.filter((item) => item.id !== staffId),
       assignments: current.assignments.filter((item) => item.staffId !== staffId),
-    }), 'Staff removed. Related allotments cleared.');
+    }), 'Staff removed.');
   }
 
   function removeAssignment(assignmentId) {
     updateBuilder((current) => ({
       ...current,
       assignments: current.assignments.filter((item) => item.id !== assignmentId),
-    }), 'Teaching allotment removed.');
+    }), 'Teaching load removed.');
+  }
+
+  function removeReservedClass(reservedClassId) {
+    updateBuilder((current) => ({
+      ...current,
+      reservedClasses: current.reservedClasses.filter((item) => item.id !== reservedClassId),
+    }), 'Reserved class slot removed.');
   }
 
   function updateReservedHours() {
     if (!reservedEditorStaffId) {
-      setStatusMessage('Add a staff member before editing reserved hours.');
+      setStatusMessage('Select a staff member first.');
       return;
     }
 
@@ -397,7 +472,7 @@ function App() {
           ? { ...item, reservedSlots: normalizeReservedSlots(reservedDraftSlots) }
           : item
       )),
-    }), 'Reserved hours updated. Generator will avoid those slots.');
+    }), 'Reserved hours updated.');
   }
 
   function toggleStaffFormReserved(day, session) {
@@ -419,24 +494,22 @@ function App() {
         <div>
           <p className="section-kicker">Shift II planner</p>
           <h1>Time Table Generator</h1>
-          <p className="hero-copy">
-            Build a clean 6-day A-F timetable with 5 sessions per day, 55-minute periods, staff workload limits, reserved staff hours, and separate student and faculty views.
-          </p>
+          <p className="hero-copy">Configure teaching loads, reserve blocked sessions, then generate.</p>
         </div>
 
         <div className="hero-actions">
           <button className="primary-button" onClick={generate}>Generate timetable</button>
-          <button className="secondary-button" onClick={saveCloud}>Save to Firebase</button>
-          <button className="secondary-button" onClick={loadCloud}>Load from Firebase</button>
-          <button className="ghost-button" onClick={clearPlanner}>Clear planner</button>
+          <button className="secondary-button" onClick={saveCloud}>Save</button>
+          <button className="secondary-button" onClick={loadCloud}>Load</button>
+          <button className="ghost-button" onClick={clearPlanner}>Clear</button>
         </div>
       </header>
 
       <section className="summary-grid">
-        <MetricCard label="Classes" value={data.classes.length} detail="Create manually or add the standard six sections." />
-        <MetricCard label="Subjects" value={data.subjects.length} detail="Each subject keeps code and short name." />
-        <MetricCard label="Staff" value={data.staff.length} detail="Reserved hours count against staff capacity." />
-        <MetricCard label="Allotments" value={data.assignments.length} detail="Weekly hours placed into the 6 x 5 grid." />
+        <MetricCard label="Classes" value={data.classes.length} />
+        <MetricCard label="Subjects" value={data.subjects.length} />
+        <MetricCard label="Staff" value={data.staff.length} />
+        <MetricCard label="Teaching Loads" value={data.assignments.length} />
       </section>
 
       <section className="status-card">
@@ -444,7 +517,7 @@ function App() {
           <p className="section-kicker">Current status</p>
           <h2>{statusMessage}</h2>
         </div>
-        <p className="muted-copy">Reserved staff slots are treated as blocked hours, so fresh teaching hours will not be placed there.</p>
+        <p className="muted-copy">Sessions run from 1:45 PM to 6:30 PM.</p>
       </section>
 
       <section className="week-card">
@@ -470,7 +543,7 @@ function App() {
           <article className="card">
             <div className="card-heading">
               <h3>Classes</h3>
-              <button className="secondary-button small-button" onClick={addStandardClasses}>Add standard 6 classes</button>
+              <button className="secondary-button small-button" onClick={addStandardClasses}>Add 6 standard classes</button>
             </div>
 
             <form className="form-stack" onSubmit={addClass}>
@@ -551,15 +624,15 @@ function App() {
                   <input required value={staffForm.shortName} onChange={(event) => setStaffForm((current) => ({ ...current, shortName: event.target.value }))} />
                 </label>
                 <label>
-                  Max weekly hours
+                  Total hours for 6-day order
                   <input min="1" max="30" type="number" value={staffForm.maxHours} onChange={(event) => setStaffForm((current) => ({ ...current, maxHours: event.target.value }))} />
                 </label>
               </div>
 
               <div className="sub-card">
                 <div className="sub-card-heading">
-                  <strong>Reserved staff hours while adding</strong>
-                  <span>Select blocked slots that cannot receive new allocations.</span>
+                  <strong>Reserved staff hours</strong>
+                  <span>Blocked hours will not receive new allocations.</span>
                 </div>
                 <ReservationGrid selectedSlots={staffForm.reservedSlots} onToggle={toggleStaffFormReserved} />
               </div>
@@ -572,7 +645,7 @@ function App() {
               items={data.staff.map((item) => ({
                 id: item.id,
                 title: `${item.shortName} · ${item.name}`,
-                meta: `${scheduledLoads.get(item.id) ?? 0} scheduled + ${reservedCounts.get(item.id) ?? 0} reserved / ${item.maxHours} hours`,
+                meta: `${scheduledLoads.get(item.id) ?? 0} scheduled + ${reservedCounts.get(item.id) ?? 0} reserved / ${item.maxHours}`,
               }))}
               onRemove={removeStaff}
             />
@@ -583,13 +656,13 @@ function App() {
       <section className="section-block">
         <div className="section-heading">
           <p className="section-kicker">Step 2</p>
-          <h2>Plan teaching allotments and blocked hours</h2>
+          <h2>Enter teaching loads and reserved slots</h2>
         </div>
 
         <div className="planning-grid">
           <article className="card large-card">
             <div className="card-heading">
-              <h3>Teaching allotments</h3>
+              <h3>Teaching load entries</h3>
             </div>
 
             <form className="form-stack" onSubmit={addAssignment}>
@@ -616,21 +689,20 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  Weekly hours
+                  Total hours in 6-day order
                   <input min="1" max="18" type="number" value={assignmentForm.weeklyHours} onChange={(event) => setAssignmentForm((current) => ({ ...current, weeklyHours: event.target.value }))} />
                 </label>
               </div>
-              <button className="primary-button small-button" type="submit">Add allotment</button>
+              <button className="primary-button small-button" type="submit">Add teaching load</button>
             </form>
 
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Class</th>
-                    <th>Subject</th>
-                    <th>Code</th>
                     <th>Staff</th>
+                    <th>Subject</th>
+                    <th>Class</th>
                     <th>Hours</th>
                     <th></th>
                   </tr>
@@ -638,16 +710,15 @@ function App() {
                 <tbody>
                   {data.assignments.length ? data.assignments.map((assignment) => (
                     <tr key={assignment.id}>
-                      <td>{classLookup.get(assignment.classId)?.label ?? '-'}</td>
-                      <td>{subjectLookup.get(assignment.subjectId)?.name ?? '-'}</td>
-                      <td>{subjectLookup.get(assignment.subjectId)?.code ?? '-'}</td>
                       <td>{staffLookup.get(assignment.staffId)?.shortName ?? '-'}</td>
+                      <td>{subjectLookup.get(assignment.subjectId)?.shortName ?? '-'}</td>
+                      <td>{classLookup.get(assignment.classId)?.label ?? '-'}</td>
                       <td>{assignment.weeklyHours}</td>
                       <td><button className="row-action" onClick={() => removeAssignment(assignment.id)}>Remove</button></td>
                     </tr>
                   )) : (
                     <tr>
-                      <td colSpan="6" className="empty-table">No allotments yet.</td>
+                      <td colSpan="5" className="empty-table">No teaching loads yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -658,7 +729,7 @@ function App() {
           <div className="side-stack">
             <article className="card">
               <div className="card-heading">
-                <h3>Reserved hours editor</h3>
+                <h3>Reserved staff hours</h3>
               </div>
 
               <div className="form-stack">
@@ -673,6 +744,76 @@ function App() {
                 <ReservationGrid selectedSlots={reservedDraftSlots} onToggle={toggleReservedDraft} disabled={!reservedEditorStaffId} />
 
                 <button className="primary-button small-button" onClick={updateReservedHours} disabled={!reservedEditorStaffId}>Save reserved hours</button>
+              </div>
+            </article>
+
+            <article className="card">
+              <div className="card-heading">
+                <h3>Reserved class slots</h3>
+              </div>
+
+              <form className="form-stack" onSubmit={addReservedClass}>
+                <div className="field-grid two-col">
+                  <label>
+                    Class
+                    <select value={reservedClassForm.classId} onChange={(event) => setReservedClassForm((current) => ({ ...current, classId: event.target.value }))}>
+                      <option value="">Select class</option>
+                      {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Day
+                    <select value={reservedClassForm.day} onChange={(event) => setReservedClassForm((current) => ({ ...current, day: event.target.value }))}>
+                      {DAYS.map((day) => <option key={day} value={day}>{day}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Session
+                    <select value={reservedClassForm.session} onChange={(event) => setReservedClassForm((current) => ({ ...current, session: Number(event.target.value) }))}>
+                      {SESSIONS.map((session) => <option key={session} value={session}>Hour {session}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Subject / activity
+                    <input value={reservedClassForm.subjectName} onChange={(event) => setReservedClassForm((current) => ({ ...current, subjectName: event.target.value }))} />
+                  </label>
+                  <label className="span-two">
+                    Staff name
+                    <input value={reservedClassForm.staffName} onChange={(event) => setReservedClassForm((current) => ({ ...current, staffName: event.target.value }))} />
+                  </label>
+                </div>
+                <button className="primary-button small-button" type="submit">Reserve class slot</button>
+              </form>
+
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Class</th>
+                      <th>Day</th>
+                      <th>Hour</th>
+                      <th>Subject</th>
+                      <th>Staff</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.reservedClasses.length ? data.reservedClasses.map((item) => (
+                      <tr key={item.id}>
+                        <td>{classLookup.get(item.classId)?.label ?? '-'}</td>
+                        <td>{item.day}</td>
+                        <td>{item.session}</td>
+                        <td>{item.subjectName}</td>
+                        <td>{item.staffName}</td>
+                        <td><button className="row-action" onClick={() => removeReservedClass(item.id)}>Remove</button></td>
+                      </tr>
+                    )) : (
+                      <tr>
+                        <td colSpan="6" className="empty-table">No reserved class slots yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </article>
 
@@ -721,7 +862,7 @@ function App() {
           <div className="card-toolbar">
             <div>
               <h3>Student timetable</h3>
-              <p className="muted-copy">Review one class or the full academic plan.</p>
+              <p className="muted-copy">Reserved external classes appear here.</p>
             </div>
             <label className="toolbar-field">
               Class view
@@ -751,7 +892,7 @@ function App() {
           <div className="card-toolbar">
             <div>
               <h3>Staff timetable</h3>
-              <p className="muted-copy">Reserved hours appear as blocked slots.</p>
+              <p className="muted-copy">Internal reserved staff hours appear as blocked slots.</p>
             </div>
             <label className="toolbar-field">
               Staff view
@@ -772,8 +913,8 @@ function App() {
                   return entry;
                 }
 
-                return reservedLookup.has(`${selectedStaff.id}:${day}:${session}`)
-                  ? { kind: 'reserved', day, session, staffId: selectedStaff.id }
+                return reservedStaffLookup.has(`${selectedStaff.id}:${day}:${session}`)
+                  ? { kind: 'reserved', day, session, subjectName: 'Reserved', staffName: 'Blocked slot' }
                   : null;
               }}
               classLookup={classLookup}
@@ -781,7 +922,7 @@ function App() {
               staffLookup={staffLookup}
               mode="staff"
             />
-          ) : <EmptyPanel text="Add staff and select a faculty member to review reserved and teaching hours." />}
+          ) : <EmptyPanel text="Add staff and select a faculty member to review the schedule." />}
         </article>
       </section>
     </div>
@@ -799,12 +940,11 @@ function toggleSlot(slots, day, session) {
   return [...slots, { day, session }];
 }
 
-function MetricCard({ label, value, detail }) {
+function MetricCard({ label, value }) {
   return (
     <article className="metric-card">
       <span>{label}</span>
       <strong>{value}</strong>
-      <p>{detail}</p>
     </article>
   );
 }
@@ -899,8 +1039,8 @@ function TimetableCard({ title, subtitle, getCell, classLookup, subjectLookup, s
                       <td>
                         {cell?.kind === 'reserved' ? (
                           <div className="slot-card reserved-card">
-                            <strong>Reserved</strong>
-                            <span>Blocked slot</span>
+                            <strong>{cell.subjectName ?? 'Reserved'}</strong>
+                            <span>{cell.staffName ?? 'Blocked slot'}</span>
                           </div>
                         ) : cell ? (
                           <div className="slot-card">

@@ -1,11 +1,11 @@
 export const DAYS = ['A', 'B', 'C', 'D', 'E', 'F'];
 export const SESSIONS = [1, 2, 3, 4, 5];
 export const SESSION_TIMES = [
-  '09:00-09:55',
-  '09:55-10:50',
-  '10:50-11:45',
-  '12:00-12:55',
-  '12:55-01:50',
+  '01:45-02:40',
+  '02:40-03:35',
+  '03:35-04:30',
+  '04:40-05:35',
+  '05:35-06:30',
 ];
 
 function scoreSlot({ assignment, day, session, currentEntries, classLoads, staffLoads, subjectSpread }) {
@@ -49,7 +49,37 @@ function normalizeReservedSlots(slots) {
   });
 }
 
-export function generateTimetable({ classes, staff, assignments }) {
+function normalizeReservedClasses(reservedClasses, classLookup) {
+  if (!Array.isArray(reservedClasses)) {
+    return [];
+  }
+
+  const unique = new Set();
+
+  return reservedClasses.flatMap((entry) => {
+    const session = Number(entry?.session);
+    const classId = entry?.classId;
+
+    if (!entry || !classLookup.has(classId) || !DAYS.includes(entry.day) || !SESSIONS.includes(session)) {
+      return [];
+    }
+
+    const key = `${classId}:${entry.day}:${session}`;
+    if (unique.has(key)) {
+      return [];
+    }
+
+    unique.add(key);
+    return [{
+      ...entry,
+      session,
+      subjectName: entry.subjectName ?? 'Reserved',
+      staffName: entry.staffName ?? 'External Staff',
+    }];
+  });
+}
+
+export function generateTimetable({ classes, staff, assignments, reservedClasses = [] }) {
   const entries = [];
   const errors = [];
   const classBusy = new Set();
@@ -60,6 +90,22 @@ export function generateTimetable({ classes, staff, assignments }) {
   const subjectSpread = new Map();
   const staffLookup = new Map(staff.map((member) => [member.id, member]));
   const classLookup = new Map(classes.map((item) => [item.id, item]));
+  const normalizedReservedClasses = normalizeReservedClasses(reservedClasses, classLookup);
+
+  for (const reservedEntry of normalizedReservedClasses) {
+    const classKey = `${reservedEntry.classId}:${reservedEntry.day}:${reservedEntry.session}`;
+    classBusy.add(classKey);
+    classLoads.set(`${reservedEntry.classId}:${reservedEntry.day}`, (classLoads.get(`${reservedEntry.classId}:${reservedEntry.day}`) ?? 0) + 1);
+    entries.push({
+      id: reservedEntry.id,
+      kind: 'reserved',
+      classId: reservedEntry.classId,
+      day: reservedEntry.day,
+      session: reservedEntry.session,
+      subjectName: reservedEntry.subjectName,
+      staffName: reservedEntry.staffName,
+    });
+  }
 
   for (const member of staff) {
     const reservedSlots = normalizeReservedSlots(member.reservedSlots);
@@ -168,6 +214,10 @@ export function groupEntries(entries) {
 export function groupEntriesByStaff(entries) {
   const map = new Map();
   for (const entry of entries) {
+    if (!entry.staffId) {
+      continue;
+    }
+
     map.set(`${entry.staffId}:${entry.day}:${entry.session}`, entry);
   }
   return map;
