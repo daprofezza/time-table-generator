@@ -368,6 +368,18 @@ button:focus {
   padding: 8px 12px;
 }
 
+.secondary-row-action {
+  background: #edf3ff;
+  color: #113d88;
+  border-color: rgba(17, 61, 136, 0.14);
+  padding: 8px 12px;
+  margin-right: 8px;
+}
+
+.secondary-row-action:hover {
+  border-color: rgba(17, 61, 136, 0.3);
+}
+
 .empty-text,
 .empty-panel,
 .empty-table {
