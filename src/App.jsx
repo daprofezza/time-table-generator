@@ -9,7 +9,7 @@ const DEFAULT_CLASS_FORM = { year: 'I', section: 'A', department: 'BBA' };
 const DEFAULT_SUBJECT_FORM = { code: '', shortName: '', name: '' };
 const DEFAULT_STAFF_FORM = { name: '', shortName: '', maxHours: 18, reservedSlots: [] };
 const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1, applyToBothSections: false };
-const DEFAULT_RESERVED_CLASS_FORM = { classId: '', day: 'A', session: 1, subjectName: '', staffName: '' };
+const DEFAULT_RESERVED_CLASS_FORM = { classId: '', day: 'A', session: 1, subjectName: '', staffName: '', applyToBothSections: false };
 
 function createId(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -387,7 +387,7 @@ function App() {
 
     const reservedClassesToAdd = [newReserved];
 
-    if (selectedClass.section === 'A') {
+    if (reservedClassForm.applyToBothSections && selectedClass.section === 'A') {
       const sectionBClassId = `${selectedClass.year}-B`;
       const sectionBClass = classLookup.get(sectionBClassId);
 
@@ -753,14 +753,6 @@ function App() {
                   <input min="1" max="30" type="number" value={assignmentForm.weeklyHours} onChange={(event) => setAssignmentForm((current) => ({ ...current, weeklyHours: event.target.value }))} />
                 </label>
               </div>
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={assignmentForm.applyToBothSections}
-                  onChange={(event) => setAssignmentForm((current) => ({ ...current, applyToBothSections: event.target.checked }))}
-                />
-                Apply to both sections (A and B) of the same year
-              </label>
               <button className="primary-button small-button" type="submit">Add teaching load</button>
             </form>
 
@@ -850,6 +842,14 @@ function App() {
                     <input placeholder="Leave empty for external/other dept" value={reservedClassForm.staffName} onChange={(event) => setReservedClassForm((current) => ({ ...current, staffName: event.target.value }))} />
                   </label>
                 </div>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={reservedClassForm.applyToBothSections}
+                    onChange={(event) => setReservedClassForm((current) => ({ ...current, applyToBothSections: event.target.checked }))}
+                  />
+                  Also reserve for section B of the same year
+                </label>
                 <button className="primary-button small-button" type="submit">Reserve class slot</button>
               </form>
 
