@@ -8,7 +8,7 @@ const EMPTY_DATA = createEmptyData();
 const DEFAULT_CLASS_FORM = { year: 'I', section: 'A', department: 'BBA' };
 const DEFAULT_SUBJECT_FORM = { code: '', shortName: '', name: '' };
 const DEFAULT_STAFF_FORM = { name: '', shortName: '', maxHours: 18, reservedSlots: [] };
-const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1 };
+const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1, applyToBothSections: false };
 const DEFAULT_RESERVED_CLASS_FORM = { classId: '', day: 'A', session: 1, subjectName: '', staffName: '' };
 
 function createId(prefix) {
@@ -315,19 +315,50 @@ function App() {
       return;
     }
 
-    updateBuilder((current) => ({
-      ...current,
-      assignments: [
-        ...current.assignments,
-        {
+    const selectedClass = classLookup.get(assignmentForm.classId);
+    if (!selectedClass) {
+      setStatusMessage('Select a valid class.');
+      return;
+    }
+
+    const newAssignments = [];
+    const hoursPerSection = assignmentForm.applyToBothSections
+      ? Math.floor(Number(assignmentForm.weeklyHours) / 2)
+      : Number(assignmentForm.weeklyHours);
+
+    const remainingHours = assignmentForm.applyToBothSections
+      ? Number(assignmentForm.weeklyHours) - hoursPerSection
+      : 0;
+
+    newAssignments.push({
+      id: createId('asg'),
+      classId: assignmentForm.classId,
+      subjectId: assignmentForm.subjectId,
+      staffId: assignmentForm.staffId,
+      weeklyHours: hoursPerSection,
+    });
+
+    if (assignmentForm.applyToBothSections && selectedClass.section === 'A') {
+      const sectionBClassId = `${selectedClass.year}-B`;
+      const sectionBExists = classLookup.has(sectionBClassId);
+
+      if (sectionBExists) {
+        newAssignments.push({
           id: createId('asg'),
-          classId: assignmentForm.classId,
+          classId: sectionBClassId,
           subjectId: assignmentForm.subjectId,
           staffId: assignmentForm.staffId,
-          weeklyHours: Number(assignmentForm.weeklyHours),
-        },
-      ],
-    }), 'Teaching load added.');
+          weeklyHours: hoursPerSection + remainingHours,
+        });
+      }
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      assignments: [...current.assignments, ...newAssignments],
+    }), newAssignments.length === 2
+      ? `Teaching load added for both ${selectedClass.year} sections.`
+      : 'Teaching load added.');
   }
 
   function addReservedClass(event) {
@@ -719,9 +750,17 @@ function App() {
                 </label>
                 <label>
                   Total hours in 6-day order
-                  <input min="1" max="18" type="number" value={assignmentForm.weeklyHours} onChange={(event) => setAssignmentForm((current) => ({ ...current, weeklyHours: event.target.value }))} />
+                  <input min="1" max="30" type="number" value={assignmentForm.weeklyHours} onChange={(event) => setAssignmentForm((current) => ({ ...current, weeklyHours: event.target.value }))} />
                 </label>
               </div>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={assignmentForm.applyToBothSections}
+                  onChange={(event) => setAssignmentForm((current) => ({ ...current, applyToBothSections: event.target.checked }))}
+                />
+                Apply to both sections (A and B) of the same year
+              </label>
               <button className="primary-button small-button" type="submit">Add teaching load</button>
             </form>
 
