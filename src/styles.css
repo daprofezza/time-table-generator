@@ -202,6 +202,23 @@ h4 {
   align-items: center;
 }
 
+.status-meta {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.inline-warning {
+  color: #8a3d3b;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.inline-note {
+  color: #8a3d3b;
+  font-size: 0.86rem;
+}
+
 .week-card {
   display: grid;
   gap: 16px;
@@ -474,6 +491,31 @@ button:focus {
   margin-top: 18px;
 }
 
+.history-card {
+  margin-top: 16px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.history-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(18, 32, 51, 0.08);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: #fbfcfe;
+}
+
+.hidden-input {
+  display: none;
+}
+
 .issues-list {
   margin: 10px 0 0;
   padding-left: 18px;
@@ -552,6 +594,11 @@ button:focus {
   background: #fafcff;
 }
 
+button:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
 @media (max-width: 1200px) {
   .summary-grid,
   .setup-grid,
@@ -612,6 +659,10 @@ button:focus {
 
   .toolbar-field {
     min-width: 100%;
+  }
+
+  .status-meta {
+    justify-items: start;
   }
 
   .primary-button,

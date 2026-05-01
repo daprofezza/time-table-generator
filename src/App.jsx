@@ -1,14 +1,18 @@
-import React, { Fragment, useEffect, useMemo, useState } from 'react';
-import { loadTimetableFromCloud, saveTimetableToCloud } from './firebase';
+import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { createEmptyData, STANDARD_CLASSES } from './sampleData';
 import { DAYS, SESSIONS, SESSION_TIMES, generateTimetable, groupEntries, groupEntriesByStaff } from './timetable';
 
 const STORAGE_KEY = 'time-table-generator-data-v3';
+const HAS_FIREBASE_ENV = Boolean(
+  import.meta.env.VITE_FIREBASE_API_KEY
+  && import.meta.env.VITE_FIREBASE_PROJECT_ID
+  && import.meta.env.VITE_FIREBASE_APP_ID,
+);
 const EMPTY_DATA = createEmptyData();
 const DEFAULT_CLASS_FORM = { year: 'I', section: 'A', department: 'BBA' };
 const DEFAULT_SUBJECT_FORM = { code: '', shortName: '', name: '' };
 const DEFAULT_STAFF_FORM = { name: '', shortName: '', maxHours: 18, reservedSlots: [] };
-const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1, applyToBothSections: false };
+const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1 };
 const DEFAULT_RESERVED_CLASS_FORM = { classId: '', day: 'A', session: 1, subjectName: '', staffName: '', applyToBothSections: false };
 
 function createId(prefix) {
@@ -17,6 +21,144 @@ function createId(prefix) {
 
 function slotKey(day, session) {
   return `${day}:${session}`;
+}
+
+function loadCloudApi() {
+  return import('./firebase');
+}
+
+function inferDepartmentFromLabel(label) {
+  const tokens = String(label ?? '').trim().split(/\s+/);
+  if (tokens.length >= 3) {
+    return tokens.slice(1, -1).join(' ');
+  }
+  return 'BBA';
+}
+
+function findOtherSectionClass(classes, sourceClass) {
+  if (!sourceClass) {
+    return null;
+  }
+
+  if (sourceClass.section !== 'A' && sourceClass.section !== 'B') {
+    return null;
+  }
+
+  const targetSection = sourceClass.section === 'A' ? 'B' : 'A';
+  const sourceDepartment = sourceClass.department || inferDepartmentFromLabel(sourceClass.label);
+
+  return classes.find((item) => (
+    item.id !== sourceClass.id
+    && item.year === sourceClass.year
+    && (item.department || inferDepartmentFromLabel(item.label)) === sourceDepartment
+    && item.section === targetSection
+  )) ?? null;
+}
+
+function validatePlannerData({ classes, subjects, staff, assignments, reservedClasses }) {
+  const errors = [];
+  const warnings = [];
+  const classIds = new Set(classes.map((item) => item.id));
+  const subjectIds = new Set(subjects.map((item) => item.id));
+  const staffMap = new Map(staff.map((item) => [item.id, item]));
+  const reservedClassSet = new Set();
+  const reservedStaffSet = new Set();
+
+  for (const member of staff) {
+    for (const slot of normalizeReservedSlots(member.reservedSlots)) {
+      reservedStaffSet.add(`${member.id}:${slot.day}:${slot.session}`);
+    }
+  }
+
+  for (const item of reservedClasses) {
+    const key = `${item.classId}:${item.day}:${Number(item.session)}`;
+    if (reservedClassSet.has(key)) {
+      warnings.push(`Duplicate reserved class slot found: ${key}.`);
+      continue;
+    }
+    reservedClassSet.add(key);
+  }
+
+  const assignmentKeys = new Set();
+
+  for (const assignment of assignments) {
+    const hours = Number(assignment.weeklyHours);
+    const assignmentKey = `${assignment.classId}:${assignment.subjectId}:${assignment.staffId}`;
+
+    if (assignmentKeys.has(assignmentKey)) {
+      warnings.push(`Duplicate teaching load found for ${assignmentKey}.`);
+    } else {
+      assignmentKeys.add(assignmentKey);
+    }
+
+    if (!classIds.has(assignment.classId)) {
+      errors.push(`Assignment ${assignment.id} references missing class.`);
+      continue;
+    }
+
+    if (!subjectIds.has(assignment.subjectId)) {
+      errors.push(`Assignment ${assignment.id} references missing subject.`);
+      continue;
+    }
+
+    const member = staffMap.get(assignment.staffId);
+    if (!member) {
+      errors.push(`Assignment ${assignment.id} references missing staff.`);
+      continue;
+    }
+
+    if (!Number.isFinite(hours) || hours < 1) {
+      errors.push(`Assignment ${assignment.id} has invalid hours.`);
+      continue;
+    }
+
+    let available = 0;
+    for (const day of DAYS) {
+      for (const session of SESSIONS) {
+        const classKey = `${assignment.classId}:${day}:${session}`;
+        const staffKey = `${assignment.staffId}:${day}:${session}`;
+        if (!reservedClassSet.has(classKey) && !reservedStaffSet.has(staffKey)) {
+          available += 1;
+        }
+      }
+    }
+
+    if (hours > available) {
+      errors.push(`Impossible load: ${assignment.id} needs ${hours}, only ${available} free slots.`);
+    }
+  }
+
+  const staffTotals = new Map(staff.map((member) => [member.id, normalizeReservedSlots(member.reservedSlots).length]));
+  for (const assignment of assignments) {
+    staffTotals.set(assignment.staffId, (staffTotals.get(assignment.staffId) ?? 0) + Number(assignment.weeklyHours || 0));
+  }
+
+  for (const member of staff) {
+    const total = staffTotals.get(member.id) ?? 0;
+    if (total > member.maxHours) {
+      errors.push(`${member.shortName} exceeds max hours (${total}/${member.maxHours}).`);
+    }
+  }
+
+  return { errors, warnings };
+}
+
+function sanitizeEntries(data) {
+  const classIds = new Set(data.classes.map((item) => item.id));
+  const subjectIds = new Set(data.subjects.map((item) => item.id));
+  const staffIds = new Set(data.staff.map((item) => item.id));
+
+  return (data.entries ?? []).filter((entry) => {
+    if (!classIds.has(entry.classId)) {
+      return false;
+    }
+
+    if (entry.kind === 'reserved') {
+      return true;
+    }
+
+    return staffIds.has(entry.staffId) && subjectIds.has(entry.subjectId);
+  });
 }
 
 function normalizeReservedSlots(slots) {
@@ -53,6 +195,7 @@ function normalizeData(candidate) {
           ...item,
           year: item.year ?? '',
           section: item.section ?? '',
+          department: item.department ?? inferDepartmentFromLabel(item.label),
           label: item.label ?? `${item.year ?? ''} BBA ${item.section ?? ''}`.trim(),
         }))
       : [],
@@ -122,6 +265,9 @@ function App() {
   const [data, setData] = useState(loadInitialState);
   const [statusMessage, setStatusMessage] = useState('Ready.');
   const [issues, setIssues] = useState([]);
+  const [cloudVersions, setCloudVersions] = useState([]);
+  const [scheduleDirty, setScheduleDirty] = useState(false);
+  const [cloudReady, setCloudReady] = useState(!HAS_FIREBASE_ENV ? false : null);
   const [classForm, setClassForm] = useState(DEFAULT_CLASS_FORM);
   const [subjectForm, setSubjectForm] = useState(DEFAULT_SUBJECT_FORM);
   const [staffForm, setStaffForm] = useState(DEFAULT_STAFF_FORM);
@@ -131,6 +277,35 @@ function App() {
   const [selectedStaffId, setSelectedStaffId] = useState('');
   const [reservedEditorStaffId, setReservedEditorStaffId] = useState('');
   const [reservedDraftSlots, setReservedDraftSlots] = useState([]);
+  const cloudApiRef = useRef(null);
+  const importInputRef = useRef(null);
+
+  useEffect(() => {
+    if (!HAS_FIREBASE_ENV) {
+      setStatusMessage('Firebase env not set. Using browser-only storage.');
+      return;
+    }
+
+    let cancelled = false;
+    loadCloudApi().then((api) => {
+      if (cancelled) {
+        return;
+      }
+      cloudApiRef.current = api;
+      setCloudReady(api.isFirebaseConfigured);
+      setStatusMessage(api.firebaseStatus);
+    }).catch((error) => {
+      if (cancelled) {
+        return;
+      }
+      setCloudReady(false);
+      setStatusMessage(error instanceof Error ? error.message : 'Firebase failed to load.');
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -225,13 +400,30 @@ function App() {
     return data.classes.filter((item) => item.id === selectedClassId);
   }, [data.classes, selectedClassId]);
 
+  const hasUnsavedReservedDraft = useMemo(() => {
+    if (!reservedEditorStaffId) {
+      return false;
+    }
+
+    const selectedStaffMember = data.staff.find((item) => item.id === reservedEditorStaffId);
+    const source = selectedStaffMember?.reservedSlots ?? [];
+    if (source.length !== reservedDraftSlots.length) {
+      return true;
+    }
+
+    const sourceKeys = new Set(source.map((slot) => slotKey(slot.day, slot.session)));
+    return reservedDraftSlots.some((slot) => !sourceKeys.has(slotKey(slot.day, slot.session)));
+  }, [data.staff, reservedDraftSlots, reservedEditorStaffId]);
+
   function updateBuilder(transform, message) {
     setData((current) => {
       const next = normalizeData(transform(current));
-      return { ...next, entries: [] };
+      next.entries = sanitizeEntries(next);
+      return next;
     });
     setIssues([]);
     setStatusMessage(message);
+    setScheduleDirty(true);
   }
 
   function addStandardClasses() {
@@ -246,7 +438,8 @@ function App() {
 
   function addClass(event) {
     event.preventDefault();
-    const label = `${classForm.year} ${classForm.department.trim() || 'BBA'} ${classForm.section}`;
+    const department = classForm.department.trim() || 'BBA';
+    const label = `${classForm.year} ${department} ${classForm.section}`;
 
     if (data.classes.some((item) => item.label.toLowerCase() === label.toLowerCase())) {
       setStatusMessage('Class already exists.');
@@ -255,7 +448,13 @@ function App() {
 
     updateBuilder((current) => ({
       ...current,
-      classes: [...current.classes, { id: createId('cls'), year: classForm.year, section: classForm.section, label }],
+      classes: [...current.classes, {
+        id: createId('cls'),
+        year: classForm.year,
+        section: classForm.section,
+        department,
+        label,
+      }],
     }), 'Class added.');
     setClassForm(DEFAULT_CLASS_FORM);
   }
@@ -315,50 +514,23 @@ function App() {
       return;
     }
 
-    const selectedClass = classLookup.get(assignmentForm.classId);
-    if (!selectedClass) {
+    if (!classLookup.has(assignmentForm.classId)) {
       setStatusMessage('Select a valid class.');
       return;
     }
 
-    const newAssignments = [];
-    const hoursPerSection = assignmentForm.applyToBothSections
-      ? Math.floor(Number(assignmentForm.weeklyHours) / 2)
-      : Number(assignmentForm.weeklyHours);
-
-    const remainingHours = assignmentForm.applyToBothSections
-      ? Number(assignmentForm.weeklyHours) - hoursPerSection
-      : 0;
-
-    newAssignments.push({
+    const newAssignment = {
       id: createId('asg'),
       classId: assignmentForm.classId,
       subjectId: assignmentForm.subjectId,
       staffId: assignmentForm.staffId,
-      weeklyHours: hoursPerSection,
-    });
-
-    if (assignmentForm.applyToBothSections && selectedClass.section === 'A') {
-      const sectionBClassId = `${selectedClass.year}-B`;
-      const sectionBExists = classLookup.has(sectionBClassId);
-
-      if (sectionBExists) {
-        newAssignments.push({
-          id: createId('asg'),
-          classId: sectionBClassId,
-          subjectId: assignmentForm.subjectId,
-          staffId: assignmentForm.staffId,
-          weeklyHours: hoursPerSection + remainingHours,
-        });
-      }
-    }
+      weeklyHours: Number(assignmentForm.weeklyHours),
+    };
 
     updateBuilder((current) => ({
       ...current,
-      assignments: [...current.assignments, ...newAssignments],
-    }), newAssignments.length === 2
-      ? `Teaching load added for both ${selectedClass.year} sections.`
-      : 'Teaching load added.');
+      assignments: [...current.assignments, newAssignment],
+    }), 'Teaching load added.');
   }
 
   function addReservedClass(event) {
@@ -387,13 +559,12 @@ function App() {
 
     const reservedClassesToAdd = [newReserved];
 
-    if (reservedClassForm.applyToBothSections && selectedClass.section === 'A') {
-      const sectionBClassId = `${selectedClass.year}-B`;
-      const sectionBClass = classLookup.get(sectionBClassId);
+    if (reservedClassForm.applyToBothSections) {
+      const otherSectionClass = findOtherSectionClass(data.classes, selectedClass);
 
-      if (sectionBClass) {
+      if (otherSectionClass) {
         const duplicateB = data.reservedClasses.some((item) => (
-          item.classId === sectionBClassId &&
+          item.classId === otherSectionClass.id &&
           item.day === reservedClassForm.day &&
           item.session === Number(reservedClassForm.session)
         ));
@@ -401,7 +572,7 @@ function App() {
         if (!duplicateB) {
           reservedClassesToAdd.push({
             id: createId('rsv'),
-            classId: sectionBClassId,
+            classId: otherSectionClass.id,
             day: reservedClassForm.day,
             session: Number(reservedClassForm.session),
             subjectName: reservedClassForm.subjectName.trim(),
@@ -433,6 +604,13 @@ function App() {
       return;
     }
 
+    const validation = validatePlannerData(data);
+    if (validation.errors.length) {
+      setIssues([...validation.errors, ...validation.warnings]);
+      setStatusMessage('Cannot generate. Fix validation errors first.');
+      return;
+    }
+
     const result = generateTimetable({
       classes: data.classes,
       staff: data.staff,
@@ -441,32 +619,135 @@ function App() {
     });
 
     setData((current) => ({ ...current, entries: result.entries }));
-    setIssues(result.errors);
-    setStatusMessage(result.errors.length ? 'Generated with warnings.' : 'Timetable generated.');
+    setIssues([...validation.warnings, ...result.errors]);
+    setScheduleDirty(false);
+    setStatusMessage(result.errors.length || validation.warnings.length ? 'Generated with warnings.' : 'Timetable generated.');
   }
 
   async function saveCloud() {
+    const api = cloudApiRef.current;
+    if (!api?.isFirebaseConfigured) {
+      setStatusMessage('Firebase not configured.');
+      return;
+    }
+
     try {
-      await saveTimetableToCloud(data);
+      await api.saveTimetableToCloud(data);
+      const versions = await api.loadTimetableVersions(12);
+      setCloudVersions(versions);
       setStatusMessage('Saved to Firebase.');
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(error instanceof Error ? error.message : 'Save failed.');
     }
   }
 
   async function loadCloud() {
+    const api = cloudApiRef.current;
+    if (!api?.isFirebaseConfigured) {
+      setStatusMessage('Firebase not configured.');
+      return;
+    }
+
     try {
-      const cloudData = await loadTimetableFromCloud();
+      const cloudData = await api.loadTimetableFromCloud();
       if (!cloudData) {
         setStatusMessage('No Firebase timetable found.');
         return;
       }
 
-      setData(normalizeData(cloudData));
+      setData(() => {
+        const normalized = normalizeData(cloudData);
+        normalized.entries = sanitizeEntries(normalized);
+        return normalized;
+      });
       setIssues([]);
+      setScheduleDirty(false);
       setStatusMessage('Loaded from Firebase.');
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(error instanceof Error ? error.message : 'Load failed.');
+    }
+  }
+
+  async function loadCloudHistory() {
+    const api = cloudApiRef.current;
+    if (!api?.isFirebaseConfigured) {
+      setStatusMessage('Firebase not configured.');
+      return;
+    }
+
+    try {
+      const versions = await api.loadTimetableVersions(12);
+      setCloudVersions(versions);
+      setStatusMessage(versions.length ? 'Cloud history loaded.' : 'No cloud history found.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'History load failed.');
+    }
+  }
+
+  async function restoreCloudVersion(versionId) {
+    const api = cloudApiRef.current;
+    if (!api?.isFirebaseConfigured) {
+      setStatusMessage('Firebase not configured.');
+      return;
+    }
+
+    try {
+      const cloudData = await api.loadTimetableVersion(versionId);
+      if (!cloudData) {
+        setStatusMessage('Version not found.');
+        return;
+      }
+
+      setData(() => {
+        const normalized = normalizeData(cloudData);
+        normalized.entries = sanitizeEntries(normalized);
+        return normalized;
+      });
+      setIssues([]);
+      setScheduleDirty(false);
+      setStatusMessage('Cloud version restored.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'Restore failed.');
+    }
+  }
+
+  function exportSnapshot() {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const content = JSON.stringify(data, null, 2);
+    const blob = new Blob([content], { type: 'application/json' });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = window.document.createElement('a');
+    anchor.href = url;
+    anchor.download = `timetable-snapshot-${Date.now()}.json`;
+    anchor.click();
+    window.URL.revokeObjectURL(url);
+    setStatusMessage('Snapshot exported.');
+  }
+
+  function triggerImportSnapshot() {
+    importInputRef.current?.click();
+  }
+
+  async function importSnapshot(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = normalizeData(JSON.parse(text));
+      parsed.entries = sanitizeEntries(parsed);
+      setData(parsed);
+      setIssues([]);
+      setScheduleDirty(false);
+      setStatusMessage('Snapshot imported.');
+    } catch {
+      setStatusMessage('Invalid snapshot file.');
     }
   }
 
@@ -477,6 +758,7 @@ function App() {
 
     setData(EMPTY_DATA);
     setIssues([]);
+    setScheduleDirty(false);
     setStatusMessage('Planner cleared.');
   }
 
@@ -485,8 +767,10 @@ function App() {
       return;
     }
 
-    updateBuilder((current) => ({ ...current, entries: [] }), 'Timetable cleared.');
+    setData((current) => ({ ...current, entries: [] }));
     setIssues([]);
+    setScheduleDirty(false);
+    setStatusMessage('Timetable cleared.');
   }
 
   function removeClass(classId) {
@@ -541,11 +825,10 @@ function App() {
       return;
     }
 
-    const otherSection = sourceClass.section === 'A' ? 'B' : 'A';
-    const targetClass = data.classes.find((c) => c.year === sourceClass.year && c.section === otherSection);
+    const targetClass = findOtherSectionClass(data.classes, sourceClass);
 
     if (!targetClass) {
-      setStatusMessage(`Section ${otherSection} for ${sourceClass.year} year does not exist. Add it first.`);
+      setStatusMessage(`Other section for ${sourceClass.label} does not exist. Add it first.`);
       return;
     }
 
@@ -616,10 +899,14 @@ function App() {
 
         <div className="hero-actions">
           <button className="primary-button" onClick={generate}>Generate timetable</button>
-          <button className="secondary-button" onClick={saveCloud}>Save</button>
-          <button className="secondary-button" onClick={loadCloud}>Load</button>
+          <button className="secondary-button" onClick={saveCloud} disabled={!cloudReady}>Save</button>
+          <button className="secondary-button" onClick={loadCloud} disabled={!cloudReady}>Load</button>
+          <button className="secondary-button" onClick={loadCloudHistory} disabled={!cloudReady}>History</button>
+          <button className="secondary-button" onClick={exportSnapshot}>Export</button>
+          <button className="secondary-button" onClick={triggerImportSnapshot}>Import</button>
           <button className="ghost-button" onClick={clearEntries}>Clear entries</button>
           <button className="ghost-button" onClick={clearPlanner}>Clear all</button>
+          <input ref={importInputRef} type="file" accept="application/json" className="hidden-input" onChange={importSnapshot} />
         </div>
       </header>
 
@@ -635,8 +922,30 @@ function App() {
           <p className="section-kicker">Current status</p>
           <h2>{statusMessage}</h2>
         </div>
-        <p className="muted-copy">Sessions run from 1:45 PM to 6:30 PM.</p>
+        <div className="status-meta">
+          <p className="muted-copy">Sessions run from 1:45 PM to 6:30 PM.</p>
+          {scheduleDirty ? <p className="inline-warning">Data changed after last generation. Regenerate timetable.</p> : null}
+        </div>
       </section>
+
+      {cloudVersions.length ? (
+        <section className="card history-card">
+          <div className="card-heading">
+            <h3>Cloud history</h3>
+          </div>
+          <div className="history-list">
+            {cloudVersions.map((version) => {
+              const stamp = version.updatedAt?.toDate ? version.updatedAt.toDate() : null;
+              return (
+                <div key={version.id} className="history-row">
+                  <span>{stamp ? stamp.toLocaleString() : 'Unknown time'}</span>
+                  <button className="row-action" onClick={() => restoreCloudVersion(version.id)}>Restore</button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
 
       <section className="week-card">
         <div>
@@ -862,6 +1171,7 @@ function App() {
                 <ReservationGrid selectedSlots={reservedDraftSlots} onToggle={toggleReservedDraft} disabled={!reservedEditorStaffId} />
 
                 <button className="primary-button small-button" onClick={updateReservedHours} disabled={!reservedEditorStaffId}>Save reserved hours</button>
+                {hasUnsavedReservedDraft ? <p className="inline-note">Unsaved changes. Click "Save reserved hours".</p> : null}
               </div>
             </article>
 
@@ -906,7 +1216,7 @@ function App() {
                     checked={reservedClassForm.applyToBothSections}
                     onChange={(event) => setReservedClassForm((current) => ({ ...current, applyToBothSections: event.target.checked }))}
                   />
-                  Also reserve for section B of the same year
+                  Also reserve same slot for the other section (same year/department)
                 </label>
                 <button className="primary-button small-button" type="submit">Reserve class slot</button>
               </form>

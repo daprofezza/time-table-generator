@@ -26,6 +26,30 @@ function scoreSlot({ assignment, day, session, currentEntries, classLoads, staff
   return (assignmentDayCount === 0 ? 12 : 5 - assignmentDayCount * 2) - classDayLoad * 0.7 - staffDayLoad * 0.7 - adjacentPenalty - assignmentTotal * 0.03;
 }
 
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let temp = Math.imul(state ^ (state >>> 15), 1 | state);
+    temp ^= temp + Math.imul(temp ^ (temp >>> 7), 61 | temp);
+    return ((temp ^ (temp >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function sortAssignmentsForAttempt(assignments, randomizer, attempt) {
+  const sorted = [...assignments].sort((left, right) => Number(right.weeklyHours) - Number(left.weeklyHours));
+  if (!attempt) {
+    return sorted;
+  }
+
+  for (let index = sorted.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(randomizer() * (index + 1));
+    [sorted[index], sorted[swapIndex]] = [sorted[swapIndex], sorted[index]];
+  }
+
+  return sorted;
+}
+
 function normalizeReservedSlots(slots) {
   if (!Array.isArray(slots)) {
     return [];
@@ -79,7 +103,7 @@ function normalizeReservedClasses(reservedClasses, classLookup) {
   });
 }
 
-export function generateTimetable({ classes, staff, assignments, reservedClasses = [] }) {
+function runGenerationAttempt({ classes, staff, assignments, reservedClasses, attempt }) {
   const entries = [];
   const errors = [];
   const classBusy = new Set();
@@ -91,6 +115,7 @@ export function generateTimetable({ classes, staff, assignments, reservedClasses
   const staffLookup = new Map(staff.map((member) => [member.id, member]));
   const classLookup = new Map(classes.map((item) => [item.id, item]));
   const normalizedReservedClasses = normalizeReservedClasses(reservedClasses, classLookup);
+  const randomizer = seededRandom((attempt + 1) * 1337);
 
   for (const reservedEntry of normalizedReservedClasses) {
     const classKey = `${reservedEntry.classId}:${reservedEntry.day}:${reservedEntry.session}`;
@@ -125,7 +150,7 @@ export function generateTimetable({ classes, staff, assignments, reservedClasses
     }
   }
 
-  const sortedAssignments = [...assignments].sort((left, right) => Number(right.weeklyHours) - Number(left.weeklyHours));
+  const sortedAssignments = sortAssignmentsForAttempt(assignments, randomizer, attempt);
 
   for (const assignment of sortedAssignments) {
     const member = staffLookup.get(assignment.staffId);
@@ -163,7 +188,7 @@ export function generateTimetable({ classes, staff, assignments, reservedClasses
               classLoads,
               staffLoads,
               subjectSpread,
-            }),
+            }) + (attempt ? (randomizer() - 0.5) * 0.25 : 0),
           });
         }
       }
@@ -201,6 +226,34 @@ export function generateTimetable({ classes, staff, assignments, reservedClasses
     entries: entries.sort((left, right) => DAYS.indexOf(left.day) - DAYS.indexOf(right.day) || left.session - right.session),
     errors,
   };
+}
+
+export function generateTimetable({ classes, staff, assignments, reservedClasses = [] }) {
+  const attemptCount = assignments.length > 20 ? 20 : 12;
+  let best = null;
+  const classLookup = new Map(classes.map((item) => [item.id, item]));
+  const reservedCount = normalizeReservedClasses(reservedClasses, classLookup).length;
+
+  for (let attempt = 0; attempt < attemptCount; attempt += 1) {
+    const current = runGenerationAttempt({ classes, staff, assignments, reservedClasses, attempt });
+    if (!best) {
+      best = current;
+    } else {
+      const currentPlaced = current.entries.length - reservedCount;
+      const bestPlaced = best.entries.length - reservedCount;
+      const currentScore = current.errors.length * 1000 - currentPlaced;
+      const bestScore = best.errors.length * 1000 - bestPlaced;
+      if (currentScore < bestScore) {
+        best = current;
+      }
+    }
+
+    if (current.errors.length === 0) {
+      break;
+    }
+  }
+
+  return best ?? { entries: [], errors: [] };
 }
 
 export function groupEntries(entries) {

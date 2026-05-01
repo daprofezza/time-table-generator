@@ -11,6 +11,9 @@ Web app for generating class and staff timetables.
 - Staff max load check (`18` hours)
 - Student timetable view
 - Staff timetable view
+- Reserved class slots and reserved staff slots
+- Cloud save/load with version history restore
+- Timetable dirty-state warning after planning edits
 - Firestore cloud save/load
 - Netlify-ready Vite build
 
@@ -31,6 +34,7 @@ npm run build
 
 1. Create Firebase project.
 2. Enable Firestore Database.
+3. Enable Authentication -> Anonymous sign-in.
 3. Copy `.env.example` to `.env`.
 4. Fill Vite Firebase variables.
 5. Optional: deploy Firestore rules with `firebase deploy --only firestore`.
@@ -39,6 +43,12 @@ Firestore document used:
 
 - Collection: `timetables`
 - Document: `main`
+- Versions: `timetables/main/versions/*`
+
+Security model:
+
+- Firestore reads/writes require authenticated user.
+- App signs in users anonymously for cloud operations.
 
 ## Netlify setup
 
