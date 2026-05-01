@@ -15,5 +15,20 @@ export function createEmptyData() {
     assignments: [],
     reservedClasses: [],
     entries: [],
+    locks: [],
+    settings: {
+      role: 'admin',
+      density: 'comfortable',
+      institution: 'SJCTNI',
+      department: 'BBA',
+      semester: '2026-S1',
+      finalizedUntil: '',
+      constraints: {
+        avoidFirstHour: false,
+        avoidLastHour: false,
+        maxConsecutive: 2,
+        avoidSameSubjectSameDay: true,
+      },
+    },
   };
 }

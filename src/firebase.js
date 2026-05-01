@@ -24,6 +24,7 @@ const firebaseConfig = {
 };
 
 const isFirebaseConfigured = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
+const sanitizeSegment = (value) => String(value ?? 'default').trim().replace(/[/.#\[\]]/g, '_') || 'default';
 
 let firestore = null;
 let auth = null;
@@ -67,8 +68,16 @@ export async function saveTimetableToCloud(data) {
     updatedAt: serverTimestamp(),
   };
 
+  const namespace = [
+    sanitizeSegment(data.settings?.institution),
+    sanitizeSegment(data.settings?.department),
+    sanitizeSegment(data.settings?.semester),
+  ].join('__');
+
   await setDoc(doc(firestore, 'timetables', 'main'), payload);
   await addDoc(collection(firestore, 'timetables', 'main', 'versions'), payload);
+  await setDoc(doc(firestore, 'timetables', namespace), payload);
+  await addDoc(collection(firestore, 'timetables', namespace, 'versions'), payload);
 }
 
 export async function loadTimetableFromCloud() {
@@ -79,6 +88,24 @@ export async function loadTimetableFromCloud() {
   await ensureCloudAuth();
 
   const snapshot = await getDoc(doc(firestore, 'timetables', 'main'));
+  if (!snapshot.exists()) {
+    return null;
+  }
+
+  const cloudData = snapshot.data();
+  delete cloudData.updatedAt;
+  return cloudData;
+}
+
+export async function loadTimetableFromNamespace(namespace) {
+  if (!firestore) {
+    throw new Error('Firebase not configured.');
+  }
+
+  await ensureCloudAuth();
+
+  const safe = sanitizeSegment(namespace);
+  const snapshot = await getDoc(doc(firestore, 'timetables', safe));
   if (!snapshot.exists()) {
     return null;
   }

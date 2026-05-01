@@ -1,19 +1,29 @@
 import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { createEmptyData, STANDARD_CLASSES } from './sampleData';
-import { DAYS, SESSIONS, SESSION_TIMES, generateTimetable, groupEntries, groupEntriesByStaff } from './timetable';
+import { DAYS, SESSIONS, SESSION_TIMES, explainIssues, generateTimetable, groupEntries, groupEntriesByStaff } from './timetable';
 
-const STORAGE_KEY = 'time-table-generator-data-v3';
+const STORAGE_KEY = 'time-table-generator-data-v4';
+const LEGACY_STORAGE_KEY = 'time-table-generator-data-v3';
 const HAS_FIREBASE_ENV = Boolean(
   import.meta.env.VITE_FIREBASE_API_KEY
   && import.meta.env.VITE_FIREBASE_PROJECT_ID
   && import.meta.env.VITE_FIREBASE_APP_ID,
 );
 const EMPTY_DATA = createEmptyData();
+const DEFAULT_SETTINGS = createEmptyData().settings;
 const DEFAULT_CLASS_FORM = { year: 'I', section: 'A', department: 'BBA' };
 const DEFAULT_SUBJECT_FORM = { code: '', shortName: '', name: '' };
 const DEFAULT_STAFF_FORM = { name: '', shortName: '', maxHours: 18, reservedSlots: [] };
-const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', weeklyHours: 1 };
-const DEFAULT_RESERVED_CLASS_FORM = { classId: '', day: 'A', session: 1, subjectName: '', staffName: '', applyToBothSections: false };
+const DEFAULT_ASSIGNMENT_FORM = { classId: '', subjectId: '', staffId: '', coStaffIds: [], roomName: '', weeklyHours: 1 };
+const DEFAULT_RESERVED_CLASS_FORM = {
+  classId: '',
+  day: 'A',
+  session: 1,
+  subjectName: '',
+  staffName: '',
+  roomName: '',
+  applyToBothSections: false,
+};
 
 function createId(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -55,7 +65,7 @@ function findOtherSectionClass(classes, sourceClass) {
   )) ?? null;
 }
 
-function validatePlannerData({ classes, subjects, staff, assignments, reservedClasses }) {
+function validatePlannerData({ classes, subjects, staff, assignments, reservedClasses, locks }) {
   const errors = [];
   const warnings = [];
   const classIds = new Set(classes.map((item) => item.id));
@@ -63,6 +73,7 @@ function validatePlannerData({ classes, subjects, staff, assignments, reservedCl
   const staffMap = new Map(staff.map((item) => [item.id, item]));
   const reservedClassSet = new Set();
   const reservedStaffSet = new Set();
+  const lockSet = new Set();
 
   for (const member of staff) {
     for (const slot of normalizeReservedSlots(member.reservedSlots)) {
@@ -77,6 +88,14 @@ function validatePlannerData({ classes, subjects, staff, assignments, reservedCl
       continue;
     }
     reservedClassSet.add(key);
+  }
+
+  for (const lock of normalizeLocks(locks)) {
+    const key = `${lock.classId}:${lock.day}:${lock.session}`;
+    if (lockSet.has(key)) {
+      warnings.push(`Duplicate lock found: ${key}.`);
+    }
+    lockSet.add(key);
   }
 
   const assignmentKeys = new Set();
@@ -107,6 +126,15 @@ function validatePlannerData({ classes, subjects, staff, assignments, reservedCl
       continue;
     }
 
+    for (const coStaffId of assignment.coStaffIds ?? []) {
+      if (!staffMap.has(coStaffId)) {
+        errors.push(`Assignment ${assignment.id} references missing co-staff.`);
+      }
+      if (coStaffId === assignment.staffId) {
+        errors.push(`Assignment ${assignment.id} has duplicate lead/co-staff.`);
+      }
+    }
+
     if (!Number.isFinite(hours) || hours < 1) {
       errors.push(`Assignment ${assignment.id} has invalid hours.`);
       continue;
@@ -117,7 +145,7 @@ function validatePlannerData({ classes, subjects, staff, assignments, reservedCl
       for (const session of SESSIONS) {
         const classKey = `${assignment.classId}:${day}:${session}`;
         const staffKey = `${assignment.staffId}:${day}:${session}`;
-        if (!reservedClassSet.has(classKey) && !reservedStaffSet.has(staffKey)) {
+        if (!reservedClassSet.has(classKey) && !reservedStaffSet.has(staffKey) && !lockSet.has(classKey)) {
           available += 1;
         }
       }
@@ -143,6 +171,24 @@ function validatePlannerData({ classes, subjects, staff, assignments, reservedCl
   return { errors, warnings };
 }
 
+function canEditByRole(role) {
+  return role === 'admin' || role === 'editor';
+}
+
+function isFinalizedLocked(settings) {
+  const value = String(settings?.finalizedUntil ?? '').trim();
+  if (!value) {
+    return false;
+  }
+
+  const target = new Date(`${value}T23:59:59`);
+  if (Number.isNaN(target.getTime())) {
+    return false;
+  }
+
+  return Date.now() <= target.getTime();
+}
+
 function sanitizeEntries(data) {
   const classIds = new Set(data.classes.map((item) => item.id));
   const subjectIds = new Set(data.subjects.map((item) => item.id));
@@ -157,8 +203,140 @@ function sanitizeEntries(data) {
       return true;
     }
 
-    return staffIds.has(entry.staffId) && subjectIds.has(entry.subjectId);
+    const hasLead = staffIds.has(entry.staffId);
+    const hasSubject = subjectIds.has(entry.subjectId);
+    const hasValidCoStaff = (entry.coStaffIds ?? []).every((item) => staffIds.has(item));
+
+    return hasLead && hasSubject && hasValidCoStaff;
   });
+}
+
+function sanitizeLocks(data) {
+  const classIds = new Set(data.classes.map((item) => item.id));
+  const subjectIds = new Set(data.subjects.map((item) => item.id));
+  const staffIds = new Set(data.staff.map((item) => item.id));
+  const unique = new Set();
+
+  return normalizeLocks(data.locks).filter((item) => {
+    if (!classIds.has(item.classId) || !subjectIds.has(item.subjectId) || !staffIds.has(item.staffId)) {
+      return false;
+    }
+
+    if ((item.coStaffIds ?? []).some((staffId) => !staffIds.has(staffId))) {
+      return false;
+    }
+
+    const key = `${item.classId}:${item.day}:${item.session}`;
+    if (unique.has(key)) {
+      return false;
+    }
+    unique.add(key);
+    return true;
+  });
+}
+
+function validateRooms(data) {
+  const issues = [];
+  const roomBusy = new Set();
+
+  for (const item of data.reservedClasses) {
+    if (!item.roomName) {
+      continue;
+    }
+    const key = `${item.roomName}:${item.day}:${item.session}`;
+    if (roomBusy.has(key)) {
+      issues.push(`Room conflict in reserved slots: ${key}.`);
+    }
+    roomBusy.add(key);
+  }
+
+  for (const item of data.locks) {
+    if (!item.roomName) {
+      continue;
+    }
+    const key = `${item.roomName}:${item.day}:${item.session}`;
+    if (roomBusy.has(key)) {
+      issues.push(`Room conflict with lock: ${key}.`);
+    }
+    roomBusy.add(key);
+  }
+
+  return issues;
+}
+
+function normalizeToasts(toasts) {
+  if (!Array.isArray(toasts)) {
+    return [];
+  }
+
+  return toasts
+    .filter((item) => item && typeof item.id === 'string' && typeof item.message === 'string')
+    .map((item) => ({
+      id: item.id,
+      type: item.type === 'error' || item.type === 'warn' ? item.type : 'success',
+      message: item.message,
+    }));
+}
+
+function normalizeLocks(locks) {
+  if (!Array.isArray(locks)) {
+    return [];
+  }
+
+  const unique = new Set();
+  return locks.flatMap((item) => {
+    const session = Number(item?.session);
+    const classId = item?.classId ?? '';
+    const subjectId = item?.subjectId ?? '';
+    const staffId = item?.staffId ?? '';
+    const coStaffIds = Array.isArray(item?.coStaffIds)
+      ? [...new Set(item.coStaffIds.filter((staff) => typeof staff === 'string' && staff && staff !== staffId))]
+      : [];
+
+    if (!item || !classId || !subjectId || !staffId || !DAYS.includes(item.day) || !SESSIONS.includes(session)) {
+      return [];
+    }
+
+    const key = `${classId}:${item.day}:${session}`;
+    if (unique.has(key)) {
+      return [];
+    }
+    unique.add(key);
+
+    return [{
+      classId,
+      subjectId,
+      staffId,
+      coStaffIds,
+      roomName: String(item?.roomName ?? '').trim(),
+      day: item.day,
+      session,
+    }];
+  });
+}
+
+function normalizeSettings(settings) {
+  const base = createEmptyData().settings;
+  if (!settings || typeof settings !== 'object') {
+    return base;
+  }
+
+  return {
+    role: settings.role === 'viewer' || settings.role === 'editor' ? settings.role : 'admin',
+    density: settings.density === 'compact' ? 'compact' : 'comfortable',
+    institution: String(settings.institution ?? (base.institution || 'SJCTNI')).trim() || 'SJCTNI',
+    department: String(settings.department ?? (base.department || 'BBA')).trim() || 'BBA',
+    semester: String(settings.semester ?? (base.semester || '2026-S1')).trim() || '2026-S1',
+    finalizedUntil: String(settings.finalizedUntil ?? ''),
+    constraints: {
+      avoidFirstHour: Boolean(settings.constraints?.avoidFirstHour),
+      avoidLastHour: Boolean(settings.constraints?.avoidLastHour),
+      maxConsecutive: Number(settings.constraints?.maxConsecutive) > 0
+        ? Number(settings.constraints.maxConsecutive)
+        : base.constraints.maxConsecutive,
+      avoidSameSubjectSameDay: settings.constraints?.avoidSameSubjectSameDay !== false,
+    },
+  };
 }
 
 function normalizeReservedSlots(slots) {
@@ -217,6 +395,10 @@ function normalizeData(candidate) {
     assignments: Array.isArray(candidate.assignments)
       ? candidate.assignments.map((item) => ({
           ...item,
+          coStaffIds: Array.isArray(item.coStaffIds)
+            ? [...new Set(item.coStaffIds.filter((staffId) => typeof staffId === 'string' && staffId && staffId !== item.staffId))]
+            : [],
+          roomName: item.roomName ?? '',
           weeklyHours: Number(item.weeklyHours) || 1,
         }))
       : [],
@@ -232,16 +414,30 @@ function normalizeData(candidate) {
             session,
             subjectName: item.subjectName ?? 'Reserved',
             staffName: item.staffName ?? 'External Staff',
+            roomName: item.roomName ?? '',
           }];
         })
       : [],
     entries: Array.isArray(candidate.entries)
       ? candidate.entries.map((item) => ({
           ...item,
+          coStaffIds: Array.isArray(item.coStaffIds)
+            ? [...new Set(item.coStaffIds.filter((staffId) => typeof staffId === 'string' && staffId && staffId !== item.staffId))]
+            : [],
           session: Number(item.session),
         }))
       : [],
+    locks: normalizeLocks(candidate.locks),
+    settings: normalizeSettings(candidate.settings),
   };
+}
+
+function normalizePlanner(candidate) {
+  const normalized = normalizeData(candidate);
+  normalized.entries = sanitizeEntries(normalized);
+  normalized.locks = sanitizeLocks(normalized);
+  normalized.settings = normalizeSettings(normalized.settings ?? DEFAULT_SETTINGS);
+  return normalized;
 }
 
 function loadInitialState() {
@@ -249,13 +445,13 @@ function loadInitialState() {
     return EMPTY_DATA;
   }
 
-  const stored = window.localStorage.getItem(STORAGE_KEY);
+  const stored = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_STORAGE_KEY);
   if (!stored) {
     return EMPTY_DATA;
   }
 
   try {
-    return normalizeData(JSON.parse(stored));
+    return normalizePlanner(JSON.parse(stored));
   } catch {
     return EMPTY_DATA;
   }
@@ -265,9 +461,22 @@ function App() {
   const [data, setData] = useState(loadInitialState);
   const [statusMessage, setStatusMessage] = useState('Ready.');
   const [issues, setIssues] = useState([]);
+  const [issueExplanations, setIssueExplanations] = useState([]);
+  const [toasts, setToasts] = useState([]);
   const [cloudVersions, setCloudVersions] = useState([]);
   const [scheduleDirty, setScheduleDirty] = useState(false);
   const [cloudReady, setCloudReady] = useState(!HAS_FIREBASE_ENV ? false : null);
+  const [printMode, setPrintMode] = useState(false);
+  const [showDensityCompact, setShowDensityCompact] = useState(false);
+  const [selectedYearFilter, setSelectedYearFilter] = useState('all');
+  const [selectedDepartmentFilter, setSelectedDepartmentFilter] = useState('all');
+  const [activeStep, setActiveStep] = useState(1);
+  const [editingAssignmentId, setEditingAssignmentId] = useState('');
+  const [editingReservedId, setEditingReservedId] = useState('');
+  const [assignmentEditor, setAssignmentEditor] = useState(null);
+  const [reservedEditor, setReservedEditor] = useState(null);
+  const [lockEditor, setLockEditor] = useState({ classId: '', subjectId: '', staffId: '', coStaffIds: [], roomName: '', day: 'A', session: 1 });
+  const [selectedRoomHeatmap, setSelectedRoomHeatmap] = useState('all');
   const [classForm, setClassForm] = useState(DEFAULT_CLASS_FORM);
   const [subjectForm, setSubjectForm] = useState(DEFAULT_SUBJECT_FORM);
   const [staffForm, setStaffForm] = useState(DEFAULT_STAFF_FORM);
@@ -279,6 +488,20 @@ function App() {
   const [reservedDraftSlots, setReservedDraftSlots] = useState([]);
   const cloudApiRef = useRef(null);
   const importInputRef = useRef(null);
+
+  const roleCanEdit = canEditByRole(data.settings?.role ?? 'admin');
+  const finalizedLocked = isFinalizedLocked(data.settings);
+  const editDisabled = !roleCanEdit || finalizedLocked;
+
+  function pushToast(type, message) {
+    const id = createId('toast');
+    setToasts((current) => [...normalizeToasts(current), { id, type, message }]);
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        setToasts((current) => current.filter((item) => item.id !== id));
+      }, 3600);
+    }
+  }
 
   useEffect(() => {
     if (!HAS_FIREBASE_ENV) {
@@ -395,10 +618,53 @@ function App() {
 
   const visibleClasses = useMemo(() => {
     if (selectedClassId === 'all') {
-      return data.classes;
+      return data.classes.filter((item) => (
+        (selectedYearFilter === 'all' || item.year === selectedYearFilter)
+        && (selectedDepartmentFilter === 'all' || item.department === selectedDepartmentFilter)
+      ));
     }
     return data.classes.filter((item) => item.id === selectedClassId);
-  }, [data.classes, selectedClassId]);
+  }, [data.classes, selectedClassId, selectedDepartmentFilter, selectedYearFilter]);
+
+  const yearOptions = useMemo(() => [...new Set(data.classes.map((item) => item.year).filter(Boolean))], [data.classes]);
+  const departmentOptions = useMemo(() => [...new Set(data.classes.map((item) => item.department).filter(Boolean))], [data.classes]);
+
+  const stepReady = useMemo(() => ({
+    step1: data.classes.length > 0 && data.subjects.length > 0 && data.staff.length > 0,
+    step2: data.assignments.length > 0 || data.reservedClasses.length > 0,
+    step3: data.entries.length > 0,
+  }), [data.assignments.length, data.classes.length, data.entries.length, data.reservedClasses.length, data.staff.length, data.subjects.length]);
+
+  const roomHeatmap = useMemo(() => {
+    const map = new Map();
+    for (const entry of data.entries) {
+      const room = entry.roomName || '';
+      if (!room) {
+        continue;
+      }
+      if (selectedRoomHeatmap !== 'all' && selectedRoomHeatmap !== room) {
+        continue;
+      }
+      const key = `${room}:${entry.day}`;
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return map;
+  }, [data.entries, selectedRoomHeatmap]);
+
+  const roomOptions = useMemo(() => {
+    const set = new Set();
+    for (const entry of data.entries) {
+      if (entry.roomName) {
+        set.add(entry.roomName);
+      }
+    }
+    for (const assignment of data.assignments) {
+      if (assignment.roomName) {
+        set.add(assignment.roomName);
+      }
+    }
+    return [...set];
+  }, [data.assignments, data.entries]);
 
   const hasUnsavedReservedDraft = useMemo(() => {
     if (!reservedEditorStaffId) {
@@ -415,14 +681,24 @@ function App() {
     return reservedDraftSlots.some((slot) => !sourceKeys.has(slotKey(slot.day, slot.session)));
   }, [data.staff, reservedDraftSlots, reservedEditorStaffId]);
 
-  function updateBuilder(transform, message) {
+  useEffect(() => {
+    setShowDensityCompact(data.settings?.density === 'compact');
+  }, [data.settings?.density]);
+
+  function updateBuilder(transform, message, options = {}) {
+    if (editDisabled && !options.force) {
+      pushToast('error', finalizedLocked ? 'Planner finalized. Editing locked until date expires.' : 'Viewer mode: editing disabled.');
+      return;
+    }
+
     setData((current) => {
-      const next = normalizeData(transform(current));
-      next.entries = sanitizeEntries(next);
+      const next = normalizePlanner(transform(current));
       return next;
     });
     setIssues([]);
+    setIssueExplanations([]);
     setStatusMessage(message);
+    pushToast('success', message);
     setScheduleDirty(true);
   }
 
@@ -509,6 +785,12 @@ function App() {
   function addAssignment(event) {
     event.preventDefault();
 
+    if (!stepReady.step1) {
+      setStatusMessage('Complete classes, subjects, and staff first.');
+      pushToast('warn', 'Step 1 incomplete.');
+      return;
+    }
+
     if (!assignmentForm.classId || !assignmentForm.subjectId || !assignmentForm.staffId) {
       setStatusMessage('Class, subject, and staff are required.');
       return;
@@ -524,6 +806,8 @@ function App() {
       classId: assignmentForm.classId,
       subjectId: assignmentForm.subjectId,
       staffId: assignmentForm.staffId,
+      coStaffIds: assignmentForm.coStaffIds ?? [],
+      roomName: assignmentForm.roomName?.trim() ?? '',
       weeklyHours: Number(assignmentForm.weeklyHours),
     };
 
@@ -531,6 +815,7 @@ function App() {
       ...current,
       assignments: [...current.assignments, newAssignment],
     }), 'Teaching load added.');
+    setAssignmentForm((current) => ({ ...DEFAULT_ASSIGNMENT_FORM, classId: current.classId, staffId: current.staffId, subjectId: current.subjectId }));
   }
 
   function addReservedClass(event) {
@@ -555,6 +840,7 @@ function App() {
       session: Number(reservedClassForm.session),
       subjectName: reservedClassForm.subjectName.trim(),
       staffName,
+      roomName: reservedClassForm.roomName?.trim() ?? '',
     };
 
     const reservedClassesToAdd = [newReserved];
@@ -577,6 +863,7 @@ function App() {
             session: Number(reservedClassForm.session),
             subjectName: reservedClassForm.subjectName.trim(),
             staffName,
+            roomName: reservedClassForm.roomName?.trim() ?? '',
           });
         }
       }
@@ -605,23 +892,34 @@ function App() {
     }
 
     const validation = validatePlannerData(data);
-    if (validation.errors.length) {
-      setIssues([...validation.errors, ...validation.warnings]);
+    const roomValidation = validateRooms(data);
+    const mergedErrors = [...validation.errors, ...roomValidation];
+
+    if (mergedErrors.length) {
+      const collected = [...mergedErrors, ...validation.warnings];
+      setIssues(collected);
+      setIssueExplanations(explainIssues(collected));
       setStatusMessage('Cannot generate. Fix validation errors first.');
+      pushToast('error', 'Generation blocked by validation errors.');
       return;
     }
 
     const result = generateTimetable({
       classes: data.classes,
+      subjects: data.subjects,
       staff: data.staff,
       assignments: data.assignments,
       reservedClasses: data.reservedClasses,
+      locks: data.locks,
+      settings: data.settings,
     });
 
-    setData((current) => ({ ...current, entries: result.entries }));
+      setData((current) => ({ ...current, entries: sanitizeEntries({ ...current, entries: result.entries }) }));
     setIssues([...validation.warnings, ...result.errors]);
+    setIssueExplanations(explainIssues([...validation.warnings, ...result.errors]));
     setScheduleDirty(false);
     setStatusMessage(result.errors.length || validation.warnings.length ? 'Generated with warnings.' : 'Timetable generated.');
+    pushToast(result.errors.length ? 'warn' : 'success', result.errors.length ? 'Generated with warnings.' : 'Timetable generated.');
   }
 
   async function saveCloud() {
@@ -655,16 +953,44 @@ function App() {
         return;
       }
 
-      setData(() => {
-        const normalized = normalizeData(cloudData);
-        normalized.entries = sanitizeEntries(normalized);
-        return normalized;
-      });
+      setData(() => normalizePlanner(cloudData));
       setIssues([]);
+      setIssueExplanations([]);
       setScheduleDirty(false);
       setStatusMessage('Loaded from Firebase.');
+      pushToast('success', 'Loaded from Firebase.');
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : 'Load failed.');
+      pushToast('error', 'Cloud load failed.');
+    }
+  }
+
+  async function loadCloudNamespace() {
+    const api = cloudApiRef.current;
+    if (!api?.isFirebaseConfigured) {
+      setStatusMessage('Firebase not configured.');
+      return;
+    }
+
+    const namespace = `${data.settings?.institution || 'default'}__${data.settings?.department || 'default'}__${data.settings?.semester || 'default'}`;
+
+    try {
+      const cloudData = await api.loadTimetableFromNamespace(namespace);
+      if (!cloudData) {
+        setStatusMessage('No cloud data found for namespace.');
+        pushToast('warn', 'No namespace snapshot found.');
+        return;
+      }
+
+      setData(() => normalizePlanner(cloudData));
+      setIssues([]);
+      setIssueExplanations([]);
+      setScheduleDirty(false);
+      setStatusMessage('Loaded namespace snapshot.');
+      pushToast('success', 'Namespace snapshot loaded.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'Namespace load failed.');
+      pushToast('error', 'Namespace load failed.');
     }
   }
 
@@ -698,11 +1024,7 @@ function App() {
         return;
       }
 
-      setData(() => {
-        const normalized = normalizeData(cloudData);
-        normalized.entries = sanitizeEntries(normalized);
-        return normalized;
-      });
+      setData(() => normalizePlanner(cloudData));
       setIssues([]);
       setScheduleDirty(false);
       setStatusMessage('Cloud version restored.');
@@ -740,8 +1062,7 @@ function App() {
 
     try {
       const text = await file.text();
-      const parsed = normalizeData(JSON.parse(text));
-      parsed.entries = sanitizeEntries(parsed);
+      const parsed = normalizePlanner(JSON.parse(text));
       setData(parsed);
       setIssues([]);
       setScheduleDirty(false);
@@ -769,8 +1090,10 @@ function App() {
 
     setData((current) => ({ ...current, entries: [] }));
     setIssues([]);
+    setIssueExplanations([]);
     setScheduleDirty(false);
     setStatusMessage('Timetable cleared.');
+    pushToast('success', 'Timetable entries cleared.');
   }
 
   function removeClass(classId) {
@@ -810,6 +1133,161 @@ function App() {
       ...current,
       reservedClasses: current.reservedClasses.filter((item) => item.id !== reservedClassId),
     }), 'Reserved class slot removed.');
+  }
+
+  function startEditAssignment(assignmentId) {
+    const existing = data.assignments.find((item) => item.id === assignmentId);
+    if (!existing) {
+      return;
+    }
+
+    setEditingAssignmentId(assignmentId);
+    setAssignmentEditor({
+      classId: existing.classId,
+      subjectId: existing.subjectId,
+      staffId: existing.staffId,
+      coStaffIds: existing.coStaffIds ?? [],
+      roomName: existing.roomName ?? '',
+      weeklyHours: existing.weeklyHours,
+    });
+  }
+
+  function saveEditedAssignment(assignmentId) {
+    if (!assignmentEditor) {
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      assignments: current.assignments.map((item) => (
+        item.id === assignmentId
+          ? {
+              ...item,
+              ...assignmentEditor,
+              weeklyHours: Number(assignmentEditor.weeklyHours),
+              coStaffIds: [...new Set((assignmentEditor.coStaffIds ?? []).filter((id) => id && id !== assignmentEditor.staffId))],
+            }
+          : item
+      )),
+    }), 'Teaching load updated.');
+
+    setEditingAssignmentId('');
+    setAssignmentEditor(null);
+  }
+
+  function startEditReserved(reservedId) {
+    const existing = data.reservedClasses.find((item) => item.id === reservedId);
+    if (!existing) {
+      return;
+    }
+
+    setEditingReservedId(reservedId);
+    setReservedEditor({
+      classId: existing.classId,
+      day: existing.day,
+      session: existing.session,
+      subjectName: existing.subjectName,
+      staffName: existing.staffName,
+      roomName: existing.roomName ?? '',
+    });
+  }
+
+  function saveEditedReserved(reservedId) {
+    if (!reservedEditor) {
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      reservedClasses: current.reservedClasses.map((item) => (
+        item.id === reservedId
+          ? {
+              ...item,
+              ...reservedEditor,
+              session: Number(reservedEditor.session),
+            }
+          : item
+      )),
+    }), 'Reserved class updated.');
+
+    setEditingReservedId('');
+    setReservedEditor(null);
+  }
+
+  function addLockFromCell(classId, day, session) {
+    if (!roleCanEdit) {
+      return;
+    }
+
+    const sourceEntry = classEntries.get(`${classId}:${day}:${session}`);
+    if (!sourceEntry?.subjectId || !sourceEntry?.staffId) {
+      setStatusMessage('Only scheduled class entries can be locked.');
+      pushToast('warn', 'Pick a scheduled class cell to lock.');
+      return;
+    }
+
+    const exists = data.locks.some((item) => item.classId === classId && item.day === day && item.session === session);
+    if (exists) {
+      updateBuilder((current) => ({
+        ...current,
+        locks: current.locks.filter((item) => !(item.classId === classId && item.day === day && item.session === session)),
+      }), 'Lock removed.');
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      locks: [
+        ...current.locks,
+        {
+          classId,
+          subjectId: sourceEntry.subjectId,
+          staffId: sourceEntry.staffId,
+          coStaffIds: sourceEntry.coStaffIds ?? [],
+          roomName: sourceEntry.roomName ?? '',
+          day,
+          session,
+        },
+      ],
+    }), 'Lock added.');
+  }
+
+  function addManualLock() {
+    if (!lockEditor.classId || !lockEditor.subjectId || !lockEditor.staffId) {
+      setStatusMessage('Lock needs class, subject, and lead staff.');
+      pushToast('warn', 'Fill lock form first.');
+      return;
+    }
+
+    const exists = data.locks.some((item) => item.classId === lockEditor.classId && item.day === lockEditor.day && item.session === Number(lockEditor.session));
+    if (exists) {
+      setStatusMessage('Lock exists already for that class slot.');
+      pushToast('warn', 'Duplicate lock ignored.');
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      locks: [
+        ...current.locks,
+        {
+          classId: lockEditor.classId,
+          subjectId: lockEditor.subjectId,
+          staffId: lockEditor.staffId,
+          coStaffIds: [...new Set((lockEditor.coStaffIds ?? []).filter((id) => id && id !== lockEditor.staffId))],
+          roomName: lockEditor.roomName?.trim() ?? '',
+          day: lockEditor.day,
+          session: Number(lockEditor.session),
+        },
+      ],
+    }), 'Manual lock added.');
+  }
+
+  function removeLock(classId, day, session) {
+    updateBuilder((current) => ({
+      ...current,
+      locks: current.locks.filter((item) => !(item.classId === classId && item.day === day && item.session === session)),
+    }), 'Lock removed.');
   }
 
   function duplicateReservedClass(reservedClassId) {
@@ -875,6 +1353,87 @@ function App() {
     }), 'Reserved hours updated.');
   }
 
+  function updateSettings(patch, message = 'Settings updated.') {
+    const patchTouchesFinalize = Object.prototype.hasOwnProperty.call(patch, 'finalizedUntil');
+    if (patchTouchesFinalize && data.settings.role !== 'admin') {
+      setStatusMessage('Only admin can change finalize date.');
+      pushToast('warn', 'Admin only setting.');
+      return;
+    }
+
+    if (finalizedLocked && !patchTouchesFinalize) {
+      setStatusMessage('Planner finalized. Only finalize date can be changed by admin.');
+      pushToast('warn', 'Finalize lock active.');
+      return;
+    }
+
+    if (patchTouchesFinalize && data.settings.role === 'admin') {
+      setData((current) => normalizePlanner({
+        ...current,
+        settings: {
+          ...current.settings,
+          finalizedUntil: patch.finalizedUntil,
+        },
+      }));
+      setStatusMessage(message);
+      pushToast('success', message);
+      return;
+    }
+
+    updateBuilder((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        ...patch,
+        constraints: {
+          ...current.settings?.constraints,
+          ...patch.constraints,
+        },
+      },
+    }), message);
+  }
+
+  function toggleConstraint(key, value) {
+    updateSettings({ constraints: { [key]: value } }, 'Constraint updated.');
+  }
+
+  function switchRole(role) {
+    if (finalizedLocked && role !== data.settings.role) {
+      setStatusMessage('Planner finalized. Role change disabled.');
+      pushToast('warn', 'Finalize lock active.');
+      return;
+    }
+
+    setData((current) => normalizePlanner({
+      ...current,
+      settings: {
+        ...current.settings,
+        role,
+      },
+    }));
+    setStatusMessage(`Role changed to ${role}.`);
+    pushToast('success', `Role changed to ${role}.`);
+  }
+
+  function toggleDensity() {
+    const next = showDensityCompact ? 'comfortable' : 'compact';
+    setShowDensityCompact(!showDensityCompact);
+    updateSettings({ density: next }, 'Density updated.');
+  }
+
+  function printTimetable() {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    setPrintMode(true);
+    window.document.body.classList.add('print-mode-fallback');
+    window.setTimeout(() => {
+      window.print();
+      setPrintMode(false);
+      window.document.body.classList.remove('print-mode-fallback');
+    }, 80);
+  }
+
   function toggleStaffFormReserved(day, session) {
     setStaffForm((current) => ({
       ...current,
@@ -886,29 +1445,145 @@ function App() {
     setReservedDraftSlots((current) => toggleSlot(current, day, session));
   }
 
+  function handleReservedGridKeyDown(event, day, session) {
+    const keys = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+    const movement = keys[event.key];
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      if (reservedEditorStaffId) {
+        toggleReservedDraft(day, session);
+      }
+      return;
+    }
+
+    if (!movement) {
+      return;
+    }
+
+    event.preventDefault();
+    const dayIndex = DAYS.indexOf(day);
+    const sessionIndex = SESSIONS.indexOf(session);
+    const nextDay = DAYS[(dayIndex + movement[0] + DAYS.length) % DAYS.length];
+    const nextSession = SESSIONS[(sessionIndex + movement[1] + SESSIONS.length) % SESSIONS.length];
+    const nextId = `reserved-grid-${nextDay}-${nextSession}`;
+    if (typeof window !== 'undefined') {
+      window.document.getElementById(nextId)?.focus();
+    }
+  }
+
   const selectedStaff = selectedStaffId ? staffLookup.get(selectedStaffId) : null;
+  const canOpenStep2 = stepReady.step1;
+  const canOpenStep3 = stepReady.step2;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${showDensityCompact ? 'compact-density' : ''} ${printMode ? 'print-mode' : ''}`}>
+      <div className="sticky-actions">
+        <div className="sticky-left">
+          <button className={`chip-button ${activeStep === 1 ? 'active-chip' : ''}`} onClick={() => setActiveStep(1)}>
+            Step 1 {stepReady.step1 ? '✓' : ''}
+          </button>
+          <button className={`chip-button ${activeStep === 2 ? 'active-chip' : ''}`} onClick={() => setActiveStep(2)} disabled={!canOpenStep2}>
+            Step 2 {stepReady.step2 ? '✓' : ''}
+          </button>
+          <button className={`chip-button ${activeStep === 3 ? 'active-chip' : ''}`} onClick={() => setActiveStep(3)} disabled={!canOpenStep3}>
+            Step 3 {stepReady.step3 ? '✓' : ''}
+          </button>
+          {!canOpenStep2 ? <span className="inline-note">Complete Step 1 first.</span> : null}
+          {canOpenStep2 && !canOpenStep3 ? <span className="inline-note">Add loads/reserved slots for Step 3.</span> : null}
+        </div>
+        <div className="sticky-right">
+              <button className="ghost-button" onClick={toggleDensity}>{showDensityCompact ? 'Comfortable' : 'Compact'}</button>
+          <button className="ghost-button" onClick={printTimetable}>Print / PDF</button>
+        </div>
+      </div>
+
+      <div className="toast-stack">
+        {normalizeToasts(toasts).map((toast) => (
+          <div key={toast.id} className={`toast-item toast-${toast.type}`}>
+            <span>{toast.message}</span>
+            <button className="ghost-button small-button" onClick={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}>Dismiss</button>
+          </div>
+        ))}
+      </div>
+
       <header className="hero-card">
         <div>
           <p className="section-kicker">Shift II planner</p>
           <h1>Time Table Generator</h1>
           <p className="hero-copy">Configure teaching loads, reserve blocked sessions, then generate.</p>
+          <div className="chip-row">
+            <span className="meta-chip">Role: {data.settings.role}</span>
+            <span className="meta-chip">{data.settings.institution}</span>
+            <span className="meta-chip">{data.settings.department}</span>
+            <span className="meta-chip">{data.settings.semester}</span>
+          </div>
         </div>
 
         <div className="hero-actions">
-          <button className="primary-button" onClick={generate}>Generate timetable</button>
-          <button className="secondary-button" onClick={saveCloud} disabled={!cloudReady}>Save</button>
+          <button className="primary-button" onClick={generate} disabled={editDisabled}>Generate timetable</button>
+          <button className="secondary-button" onClick={saveCloud} disabled={!cloudReady || editDisabled}>Save</button>
           <button className="secondary-button" onClick={loadCloud} disabled={!cloudReady}>Load</button>
+          <button className="secondary-button" onClick={loadCloudNamespace} disabled={!cloudReady}>Load namespace</button>
           <button className="secondary-button" onClick={loadCloudHistory} disabled={!cloudReady}>History</button>
           <button className="secondary-button" onClick={exportSnapshot}>Export</button>
-          <button className="secondary-button" onClick={triggerImportSnapshot}>Import</button>
-          <button className="ghost-button" onClick={clearEntries}>Clear entries</button>
-          <button className="ghost-button" onClick={clearPlanner}>Clear all</button>
+          <button className="secondary-button" onClick={triggerImportSnapshot} disabled={editDisabled}>Import</button>
+          <button className="ghost-button" onClick={clearEntries} disabled={editDisabled}>Clear entries</button>
+          <button className="ghost-button" onClick={clearPlanner} disabled={editDisabled}>Clear all</button>
           <input ref={importInputRef} type="file" accept="application/json" className="hidden-input" onChange={importSnapshot} />
         </div>
       </header>
+
+      <section className="card settings-card">
+        <div className="card-heading">
+          <h3>Planner settings</h3>
+        </div>
+        <div className="field-grid four-col">
+          <label>
+            Role
+                  <select value={data.settings.role} onChange={(event) => switchRole(event.target.value)} disabled={editDisabled}>
+              <option value="admin">Admin</option>
+              <option value="editor">Editor</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </label>
+          <label>
+            Institution
+            <input value={data.settings.institution} onChange={(event) => updateSettings({ institution: event.target.value }, 'Institution updated.')} disabled={editDisabled} />
+          </label>
+          <label>
+            Department
+            <input value={data.settings.department} onChange={(event) => updateSettings({ department: event.target.value }, 'Department updated.')} disabled={editDisabled} />
+          </label>
+          <label>
+            Semester
+            <input value={data.settings.semester} onChange={(event) => updateSettings({ semester: event.target.value }, 'Semester updated.')} disabled={editDisabled} />
+          </label>
+          <label>
+            Finalize until (YYYY-MM-DD)
+            <input type="date" value={data.settings.finalizedUntil ?? ''} onChange={(event) => updateSettings({ finalizedUntil: event.target.value }, 'Finalize date updated.')} disabled={data.settings.role !== 'admin'} />
+          </label>
+        </div>
+        <div className="constraint-row">
+          <label className="checkbox-label">
+            <input type="checkbox" checked={data.settings.constraints.avoidFirstHour} onChange={(event) => toggleConstraint('avoidFirstHour', event.target.checked)} disabled={editDisabled} />
+            Avoid first hour
+          </label>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={data.settings.constraints.avoidLastHour} onChange={(event) => toggleConstraint('avoidLastHour', event.target.checked)} disabled={editDisabled} />
+            Avoid last hour
+          </label>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={data.settings.constraints.avoidSameSubjectSameDay} onChange={(event) => toggleConstraint('avoidSameSubjectSameDay', event.target.checked)} disabled={editDisabled} />
+            Avoid same subject same day
+          </label>
+          <label>
+            Max consecutive classes
+            <input type="number" min="1" max="5" value={data.settings.constraints.maxConsecutive} onChange={(event) => toggleConstraint('maxConsecutive', Number(event.target.value))} disabled={editDisabled} />
+          </label>
+        </div>
+        {finalizedLocked ? <p className="inline-warning">Planner finalized until {data.settings.finalizedUntil}. Editing disabled.</p> : null}
+      </section>
 
       <section className="summary-grid">
         <MetricCard label="Classes" value={data.classes.length} />
@@ -947,6 +1622,17 @@ function App() {
         </section>
       ) : null}
 
+      {issues.length ? (
+        <section className="card explain-card">
+          <div className="card-heading">
+            <h3>Conflict explain panel</h3>
+          </div>
+          <ul className="issues-list">
+            {(issueExplanations.length ? issueExplanations : explainIssues(issues)).map((issue) => <li key={issue}>{issue}</li>)}
+          </ul>
+        </section>
+      ) : null}
+
       <section className="week-card">
         <div>
           <p className="section-kicker">Academic week</p>
@@ -960,6 +1646,7 @@ function App() {
         </div>
       </section>
 
+      {activeStep === 1 ? (
       <section className="section-block">
         <div className="section-heading">
           <p className="section-kicker">Step 1</p>
@@ -970,14 +1657,14 @@ function App() {
           <article className="card">
             <div className="card-heading">
               <h3>Classes</h3>
-              <button className="secondary-button small-button" onClick={addStandardClasses}>Add 6 standard classes</button>
+              <button className="secondary-button small-button" onClick={addStandardClasses} disabled={editDisabled}>Add 6 standard classes</button>
             </div>
 
             <form className="form-stack" onSubmit={addClass}>
               <div className="field-grid three-col">
                 <label>
                   Year
-                  <select value={classForm.year} onChange={(event) => setClassForm((current) => ({ ...current, year: event.target.value }))}>
+                  <select value={classForm.year} onChange={(event) => setClassForm((current) => ({ ...current, year: event.target.value }))} disabled={editDisabled}>
                     <option value="I">I</option>
                     <option value="II">II</option>
                     <option value="III">III</option>
@@ -985,23 +1672,24 @@ function App() {
                 </label>
                 <label>
                   Section
-                  <select value={classForm.section} onChange={(event) => setClassForm((current) => ({ ...current, section: event.target.value }))}>
+                  <select value={classForm.section} onChange={(event) => setClassForm((current) => ({ ...current, section: event.target.value }))} disabled={editDisabled}>
                     <option value="A">A</option>
                     <option value="B">B</option>
                   </select>
                 </label>
                 <label>
                   Department
-                  <input value={classForm.department} onChange={(event) => setClassForm((current) => ({ ...current, department: event.target.value }))} />
+                  <input value={classForm.department} onChange={(event) => setClassForm((current) => ({ ...current, department: event.target.value }))} disabled={editDisabled} />
                 </label>
               </div>
-              <button className="primary-button small-button" type="submit">Add class</button>
+              <button className="primary-button small-button" type="submit" disabled={editDisabled}>Add class</button>
             </form>
 
             <SimpleList
               emptyText="No classes yet."
               items={data.classes.map((item) => ({ id: item.id, title: item.label, meta: `${item.year} year · Section ${item.section}` }))}
               onRemove={removeClass}
+              removeDisabled={editDisabled}
             />
           </article>
 
@@ -1014,24 +1702,25 @@ function App() {
               <div className="field-grid">
                 <label>
                   Subject code
-                  <input required value={subjectForm.code} onChange={(event) => setSubjectForm((current) => ({ ...current, code: event.target.value }))} />
+                  <input required value={subjectForm.code} onChange={(event) => setSubjectForm((current) => ({ ...current, code: event.target.value }))} disabled={editDisabled} />
                 </label>
                 <label>
                   Short name
-                  <input required value={subjectForm.shortName} onChange={(event) => setSubjectForm((current) => ({ ...current, shortName: event.target.value }))} />
+                  <input required value={subjectForm.shortName} onChange={(event) => setSubjectForm((current) => ({ ...current, shortName: event.target.value }))} disabled={editDisabled} />
                 </label>
                 <label>
                   Subject name
-                  <input required value={subjectForm.name} onChange={(event) => setSubjectForm((current) => ({ ...current, name: event.target.value }))} />
+                  <input required value={subjectForm.name} onChange={(event) => setSubjectForm((current) => ({ ...current, name: event.target.value }))} disabled={editDisabled} />
                 </label>
               </div>
-              <button className="primary-button small-button" type="submit">Add subject</button>
+              <button className="primary-button small-button" type="submit" disabled={editDisabled}>Add subject</button>
             </form>
 
             <SimpleList
               emptyText="No subjects yet."
               items={data.subjects.map((item) => ({ id: item.id, title: `${item.shortName} · ${item.name}`, meta: item.code }))}
               onRemove={removeSubject}
+              removeDisabled={editDisabled}
             />
           </article>
 
@@ -1044,15 +1733,15 @@ function App() {
               <div className="field-grid three-col">
                 <label>
                   Staff name
-                  <input required value={staffForm.name} onChange={(event) => setStaffForm((current) => ({ ...current, name: event.target.value }))} />
+                  <input required value={staffForm.name} onChange={(event) => setStaffForm((current) => ({ ...current, name: event.target.value }))} disabled={editDisabled} />
                 </label>
                 <label>
                   Short name
-                  <input required value={staffForm.shortName} onChange={(event) => setStaffForm((current) => ({ ...current, shortName: event.target.value }))} />
+                  <input required value={staffForm.shortName} onChange={(event) => setStaffForm((current) => ({ ...current, shortName: event.target.value }))} disabled={editDisabled} />
                 </label>
                 <label>
                   Total hours for 6-day order
-                  <input min="1" max="30" type="number" value={staffForm.maxHours} onChange={(event) => setStaffForm((current) => ({ ...current, maxHours: event.target.value }))} />
+                  <input min="1" max="30" type="number" value={staffForm.maxHours} onChange={(event) => setStaffForm((current) => ({ ...current, maxHours: event.target.value }))} disabled={editDisabled} />
                 </label>
               </div>
 
@@ -1061,10 +1750,10 @@ function App() {
                   <strong>Reserved staff hours</strong>
                   <span>Blocked hours will not receive new allocations.</span>
                 </div>
-                <ReservationGrid selectedSlots={staffForm.reservedSlots} onToggle={toggleStaffFormReserved} />
+                <ReservationGrid selectedSlots={staffForm.reservedSlots} onToggle={toggleStaffFormReserved} disabled={editDisabled} cellIdPrefix="staff-form-grid" />
               </div>
 
-              <button className="primary-button small-button" type="submit">Add staff member</button>
+              <button className="primary-button small-button" type="submit" disabled={editDisabled}>Add staff member</button>
             </form>
 
             <SimpleList
@@ -1075,11 +1764,14 @@ function App() {
                 meta: `${scheduledLoads.get(item.id) ?? 0} scheduled + ${reservedCounts.get(item.id) ?? 0} reserved / ${item.maxHours}`,
               }))}
               onRemove={removeStaff}
+              removeDisabled={editDisabled}
             />
           </article>
         </div>
       </section>
+      ) : null}
 
+      {activeStep === 2 ? (
       <section className="section-block">
         <div className="section-heading">
           <p className="section-kicker">Step 2</p>
@@ -1096,31 +1788,44 @@ function App() {
               <div className="field-grid four-col">
                 <label>
                   Class
-                  <select value={assignmentForm.classId} onChange={(event) => setAssignmentForm((current) => ({ ...current, classId: event.target.value }))}>
+                  <select value={assignmentForm.classId} onChange={(event) => setAssignmentForm((current) => ({ ...current, classId: event.target.value }))} disabled={editDisabled}>
                     <option value="">Select class</option>
                     {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                   </select>
                 </label>
                 <label>
                   Subject
-                  <select value={assignmentForm.subjectId} onChange={(event) => setAssignmentForm((current) => ({ ...current, subjectId: event.target.value }))}>
+                  <select value={assignmentForm.subjectId} onChange={(event) => setAssignmentForm((current) => ({ ...current, subjectId: event.target.value }))} disabled={editDisabled}>
                     <option value="">Select subject</option>
                     {data.subjects.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
                   </select>
                 </label>
                 <label>
                   Staff
-                  <select value={assignmentForm.staffId} onChange={(event) => setAssignmentForm((current) => ({ ...current, staffId: event.target.value }))}>
+                  <select value={assignmentForm.staffId} onChange={(event) => setAssignmentForm((current) => ({ ...current, staffId: event.target.value }))} disabled={editDisabled}>
                     <option value="">Select staff</option>
                     {data.staff.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
                   </select>
                 </label>
                 <label>
                   Total hours in 6-day order
-                  <input min="1" max="30" type="number" value={assignmentForm.weeklyHours} onChange={(event) => setAssignmentForm((current) => ({ ...current, weeklyHours: event.target.value }))} />
+                  <input min="1" max="30" type="number" value={assignmentForm.weeklyHours} onChange={(event) => setAssignmentForm((current) => ({ ...current, weeklyHours: event.target.value }))} disabled={editDisabled} />
+                </label>
+                <label>
+                  Room (optional)
+                  <input value={assignmentForm.roomName ?? ''} onChange={(event) => setAssignmentForm((current) => ({ ...current, roomName: event.target.value }))} disabled={editDisabled} />
+                </label>
+                <label className="span-two">
+                  Co-staff (optional)
+                  <select multiple value={assignmentForm.coStaffIds ?? []} onChange={(event) => {
+                    const values = Array.from(event.target.selectedOptions).map((item) => item.value);
+                    setAssignmentForm((current) => ({ ...current, coStaffIds: values.filter((id) => id !== current.staffId) }));
+                  }} disabled={editDisabled}>
+                    {data.staff.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                  </select>
                 </label>
               </div>
-              <button className="primary-button small-button" type="submit">Add teaching load</button>
+              <button className="primary-button small-button" type="submit" disabled={editDisabled}>Add teaching load</button>
             </form>
 
             <div className="table-wrap">
@@ -1130,6 +1835,8 @@ function App() {
                     <th>Staff</th>
                     <th>Subject</th>
                     <th>Class</th>
+                    <th>Co-staff</th>
+                    <th>Room</th>
                     <th>Hours</th>
                     <th></th>
                   </tr>
@@ -1137,15 +1844,56 @@ function App() {
                 <tbody>
                   {data.assignments.length ? data.assignments.map((assignment) => (
                     <tr key={assignment.id}>
-                      <td>{staffLookup.get(assignment.staffId)?.shortName ?? '-'}</td>
-                      <td>{subjectLookup.get(assignment.subjectId)?.shortName ?? '-'}</td>
-                      <td>{classLookup.get(assignment.classId)?.label ?? '-'}</td>
-                      <td>{assignment.weeklyHours}</td>
-                      <td><button className="row-action" onClick={() => removeAssignment(assignment.id)}>Remove</button></td>
+                      {editingAssignmentId === assignment.id && assignmentEditor ? (
+                        <>
+                          <td>
+                            <select value={assignmentEditor.staffId} onChange={(event) => setAssignmentEditor((current) => ({ ...current, staffId: event.target.value, coStaffIds: (current.coStaffIds ?? []).filter((id) => id !== event.target.value) }))}>
+                              {data.staff.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                            </select>
+                          </td>
+                          <td>
+                            <select value={assignmentEditor.subjectId} onChange={(event) => setAssignmentEditor((current) => ({ ...current, subjectId: event.target.value }))}>
+                              {data.subjects.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                            </select>
+                          </td>
+                          <td>
+                            <select value={assignmentEditor.classId} onChange={(event) => setAssignmentEditor((current) => ({ ...current, classId: event.target.value }))}>
+                              {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                            </select>
+                          </td>
+                          <td>
+                            <select multiple value={assignmentEditor.coStaffIds ?? []} onChange={(event) => {
+                              const values = Array.from(event.target.selectedOptions).map((item) => item.value);
+                              setAssignmentEditor((current) => ({ ...current, coStaffIds: values.filter((id) => id !== current.staffId) }));
+                            }}>
+                              {data.staff.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                            </select>
+                          </td>
+                          <td><input value={assignmentEditor.roomName ?? ''} onChange={(event) => setAssignmentEditor((current) => ({ ...current, roomName: event.target.value }))} /></td>
+                          <td><input type="number" min="1" max="30" value={assignmentEditor.weeklyHours} onChange={(event) => setAssignmentEditor((current) => ({ ...current, weeklyHours: event.target.value }))} /></td>
+                          <td>
+                            <button className="row-action secondary-row-action" onClick={() => saveEditedAssignment(assignment.id)} disabled={editDisabled}>Save</button>
+                            <button className="row-action" onClick={() => { setEditingAssignmentId(''); setAssignmentEditor(null); }}>Cancel</button>
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td>{staffLookup.get(assignment.staffId)?.shortName ?? '-'}</td>
+                          <td>{subjectLookup.get(assignment.subjectId)?.shortName ?? '-'}</td>
+                          <td>{classLookup.get(assignment.classId)?.label ?? '-'}</td>
+                          <td>{(assignment.coStaffIds ?? []).map((id) => staffLookup.get(id)?.shortName ?? '-').join(', ') || '-'}</td>
+                          <td>{assignment.roomName || '-'}</td>
+                          <td>{assignment.weeklyHours}</td>
+                          <td>
+                            <button className="row-action secondary-row-action" onClick={() => startEditAssignment(assignment.id)} disabled={editDisabled}>Edit</button>
+                            <button className="row-action" onClick={() => removeAssignment(assignment.id)} disabled={editDisabled}>Remove</button>
+                          </td>
+                        </>
+                      )}
                     </tr>
                   )) : (
                     <tr>
-                      <td colSpan="5" className="empty-table">No teaching loads yet.</td>
+                      <td colSpan="7" className="empty-table">No teaching loads yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -1162,15 +1910,21 @@ function App() {
               <div className="form-stack">
                 <label>
                   Staff member
-                  <select value={reservedEditorStaffId} onChange={(event) => setReservedEditorStaffId(event.target.value)}>
+                  <select value={reservedEditorStaffId} onChange={(event) => setReservedEditorStaffId(event.target.value)} disabled={editDisabled}>
                     <option value="">Select staff</option>
                     {data.staff.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                   </select>
                 </label>
 
-                <ReservationGrid selectedSlots={reservedDraftSlots} onToggle={toggleReservedDraft} disabled={!reservedEditorStaffId} />
+                <ReservationGrid
+                  selectedSlots={reservedDraftSlots}
+                  onToggle={toggleReservedDraft}
+                  onKeyDown={handleReservedGridKeyDown}
+                  disabled={!reservedEditorStaffId || editDisabled}
+                  cellIdPrefix="reserved-grid"
+                />
 
-                <button className="primary-button small-button" onClick={updateReservedHours} disabled={!reservedEditorStaffId}>Save reserved hours</button>
+                <button className="primary-button small-button" onClick={updateReservedHours} disabled={!reservedEditorStaffId || editDisabled}>Save reserved hours</button>
                 {hasUnsavedReservedDraft ? <p className="inline-note">Unsaved changes. Click "Save reserved hours".</p> : null}
               </div>
             </article>
@@ -1184,30 +1938,34 @@ function App() {
                 <div className="field-grid two-col">
                   <label>
                     Class
-                    <select value={reservedClassForm.classId} onChange={(event) => setReservedClassForm((current) => ({ ...current, classId: event.target.value }))}>
+                    <select value={reservedClassForm.classId} onChange={(event) => setReservedClassForm((current) => ({ ...current, classId: event.target.value }))} disabled={editDisabled}>
                       <option value="">Select class</option>
                       {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                     </select>
                   </label>
                   <label>
                     Day
-                    <select value={reservedClassForm.day} onChange={(event) => setReservedClassForm((current) => ({ ...current, day: event.target.value }))}>
+                    <select value={reservedClassForm.day} onChange={(event) => setReservedClassForm((current) => ({ ...current, day: event.target.value }))} disabled={editDisabled}>
                       {DAYS.map((day) => <option key={day} value={day}>{day}</option>)}
                     </select>
                   </label>
                   <label>
                     Session
-                    <select value={reservedClassForm.session} onChange={(event) => setReservedClassForm((current) => ({ ...current, session: Number(event.target.value) }))}>
+                    <select value={reservedClassForm.session} onChange={(event) => setReservedClassForm((current) => ({ ...current, session: Number(event.target.value) }))} disabled={editDisabled}>
                       {SESSIONS.map((session) => <option key={session} value={session}>Hour {session}</option>)}
                     </select>
                   </label>
                   <label>
                     Subject / activity
-                    <input value={reservedClassForm.subjectName} onChange={(event) => setReservedClassForm((current) => ({ ...current, subjectName: event.target.value }))} />
+                    <input value={reservedClassForm.subjectName} onChange={(event) => setReservedClassForm((current) => ({ ...current, subjectName: event.target.value }))} disabled={editDisabled} />
                   </label>
                   <label className="span-two">
                     Staff name (optional)
-                    <input placeholder="Leave empty for external/other dept" value={reservedClassForm.staffName} onChange={(event) => setReservedClassForm((current) => ({ ...current, staffName: event.target.value }))} />
+                    <input placeholder="Leave empty for external/other dept" value={reservedClassForm.staffName} onChange={(event) => setReservedClassForm((current) => ({ ...current, staffName: event.target.value }))} disabled={editDisabled} />
+                  </label>
+                  <label className="span-two">
+                    Room (optional)
+                    <input placeholder="e.g. Lab-1" value={reservedClassForm.roomName ?? ''} onChange={(event) => setReservedClassForm((current) => ({ ...current, roomName: event.target.value }))} disabled={editDisabled} />
                   </label>
                 </div>
                 <label className="checkbox-label">
@@ -1215,10 +1973,11 @@ function App() {
                     type="checkbox"
                     checked={reservedClassForm.applyToBothSections}
                     onChange={(event) => setReservedClassForm((current) => ({ ...current, applyToBothSections: event.target.checked }))}
+                    disabled={editDisabled}
                   />
                   Also reserve same slot for the other section (same year/department)
                 </label>
-                <button className="primary-button small-button" type="submit">Reserve class slot</button>
+                <button className="primary-button small-button" type="submit" disabled={editDisabled}>Reserve class slot</button>
               </form>
 
               <div className="table-wrap">
@@ -1230,25 +1989,150 @@ function App() {
                       <th>Hour</th>
                       <th>Subject</th>
                       <th>Staff</th>
+                      <th>Room</th>
                       <th></th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.reservedClasses.length ? data.reservedClasses.map((item) => (
                       <tr key={item.id}>
-                        <td>{classLookup.get(item.classId)?.label ?? '-'}</td>
-                        <td>{item.day}</td>
-                        <td>{item.session}</td>
-                        <td>{item.subjectName}</td>
-                        <td>{item.staffName}</td>
-                        <td>
-                          <button className="row-action secondary-row-action" onClick={() => duplicateReservedClass(item.id)}>Add to other section</button>
-                          <button className="row-action" onClick={() => removeReservedClass(item.id)}>Remove</button>
-                        </td>
+                        {editingReservedId === item.id && reservedEditor ? (
+                          <>
+                            <td>
+                              <select value={reservedEditor.classId} onChange={(event) => setReservedEditor((current) => ({ ...current, classId: event.target.value }))}>
+                                {data.classes.map((row) => <option key={row.id} value={row.id}>{row.label}</option>)}
+                              </select>
+                            </td>
+                            <td>
+                              <select value={reservedEditor.day} onChange={(event) => setReservedEditor((current) => ({ ...current, day: event.target.value }))}>
+                                {DAYS.map((day) => <option key={day} value={day}>{day}</option>)}
+                              </select>
+                            </td>
+                            <td>
+                              <select value={reservedEditor.session} onChange={(event) => setReservedEditor((current) => ({ ...current, session: Number(event.target.value) }))}>
+                                {SESSIONS.map((session) => <option key={session} value={session}>{session}</option>)}
+                              </select>
+                            </td>
+                            <td><input value={reservedEditor.subjectName} onChange={(event) => setReservedEditor((current) => ({ ...current, subjectName: event.target.value }))} /></td>
+                            <td><input value={reservedEditor.staffName} onChange={(event) => setReservedEditor((current) => ({ ...current, staffName: event.target.value }))} /></td>
+                            <td><input value={reservedEditor.roomName ?? ''} onChange={(event) => setReservedEditor((current) => ({ ...current, roomName: event.target.value }))} /></td>
+                            <td>
+                              <button className="row-action secondary-row-action" onClick={() => saveEditedReserved(item.id)} disabled={editDisabled}>Save</button>
+                              <button className="row-action" onClick={() => { setEditingReservedId(''); setReservedEditor(null); }}>Cancel</button>
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td>{classLookup.get(item.classId)?.label ?? '-'}</td>
+                            <td>{item.day}</td>
+                            <td>{item.session}</td>
+                            <td>{item.subjectName}</td>
+                            <td>{item.staffName}</td>
+                            <td>{item.roomName || '-'}</td>
+                            <td>
+                              <button className="row-action secondary-row-action" onClick={() => startEditReserved(item.id)} disabled={editDisabled}>Edit</button>
+                              <button className="row-action secondary-row-action" onClick={() => duplicateReservedClass(item.id)} disabled={editDisabled}>Add to other section</button>
+                              <button className="row-action" onClick={() => removeReservedClass(item.id)} disabled={editDisabled}>Remove</button>
+                            </td>
+                          </>
+                        )}
                       </tr>
                     )) : (
                       <tr>
-                        <td colSpan="6" className="empty-table">No reserved class slots yet.</td>
+                        <td colSpan="7" className="empty-table">No reserved class slots yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+
+            <article className="card">
+              <div className="card-heading">
+                <h3>Pinned locks</h3>
+              </div>
+
+              <div className="form-stack">
+                <div className="field-grid two-col">
+                  <label>
+                    Class
+                    <select value={lockEditor.classId} onChange={(event) => setLockEditor((current) => ({ ...current, classId: event.target.value }))} disabled={editDisabled}>
+                      <option value="">Select class</option>
+                      {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Subject
+                    <select value={lockEditor.subjectId} onChange={(event) => setLockEditor((current) => ({ ...current, subjectId: event.target.value }))} disabled={editDisabled}>
+                      <option value="">Select subject</option>
+                      {data.subjects.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Lead staff
+                    <select value={lockEditor.staffId} onChange={(event) => setLockEditor((current) => ({ ...current, staffId: event.target.value, coStaffIds: (current.coStaffIds ?? []).filter((id) => id !== event.target.value) }))} disabled={editDisabled}>
+                      <option value="">Select staff</option>
+                      {data.staff.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Co-staff
+                    <select multiple value={lockEditor.coStaffIds ?? []} onChange={(event) => {
+                      const values = Array.from(event.target.selectedOptions).map((item) => item.value);
+                      setLockEditor((current) => ({ ...current, coStaffIds: values.filter((id) => id !== current.staffId) }));
+                    }} disabled={editDisabled}>
+                      {data.staff.map((item) => <option key={item.id} value={item.id}>{item.shortName}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Day
+                    <select value={lockEditor.day} onChange={(event) => setLockEditor((current) => ({ ...current, day: event.target.value }))} disabled={editDisabled}>
+                      {DAYS.map((day) => <option key={day} value={day}>{day}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Session
+                    <select value={lockEditor.session} onChange={(event) => setLockEditor((current) => ({ ...current, session: Number(event.target.value) }))} disabled={editDisabled}>
+                      {SESSIONS.map((session) => <option key={session} value={session}>{session}</option>)}
+                    </select>
+                  </label>
+                  <label className="span-two">
+                    Room
+                    <input value={lockEditor.roomName ?? ''} onChange={(event) => setLockEditor((current) => ({ ...current, roomName: event.target.value }))} disabled={editDisabled} />
+                  </label>
+                </div>
+                <button className="primary-button small-button" onClick={addManualLock} disabled={editDisabled}>Add lock</button>
+              </div>
+
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Class</th>
+                      <th>Day</th>
+                      <th>Hour</th>
+                      <th>Subject</th>
+                      <th>Lead</th>
+                      <th>Co-staff</th>
+                      <th>Room</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.locks.length ? data.locks.map((item) => (
+                      <tr key={`${item.classId}-${item.day}-${item.session}`}>
+                        <td>{classLookup.get(item.classId)?.label ?? '-'}</td>
+                        <td>{item.day}</td>
+                        <td>{item.session}</td>
+                        <td>{subjectLookup.get(item.subjectId)?.shortName ?? '-'}</td>
+                        <td>{staffLookup.get(item.staffId)?.shortName ?? '-'}</td>
+                        <td>{(item.coStaffIds ?? []).map((id) => staffLookup.get(id)?.shortName ?? '-').join(', ') || '-'}</td>
+                        <td>{item.roomName || '-'}</td>
+                        <td><button className="row-action" onClick={() => removeLock(item.classId, item.day, item.session)} disabled={editDisabled}>Remove</button></td>
+                      </tr>
+                    )) : (
+                      <tr>
+                        <td colSpan="8" className="empty-table">No locks yet.</td>
                       </tr>
                     )}
                   </tbody>
@@ -1286,11 +2170,32 @@ function App() {
                   </ul>
                 ) : <p className="empty-text">No issues reported.</p>}
               </div>
+
+              <div className="issues-block">
+                <strong>Room heatmap</strong>
+                <label className="toolbar-field">
+                  Room
+                  <select value={selectedRoomHeatmap} onChange={(event) => setSelectedRoomHeatmap(event.target.value)}>
+                    <option value="all">All rooms</option>
+                    {roomOptions.map((room) => <option key={room} value={room}>{room}</option>)}
+                  </select>
+                </label>
+                <div className="heatmap-grid">
+                  {DAYS.map((day) => (
+                    <div key={day} className="heatmap-cell">
+                      <strong>{day}</strong>
+                      <span>{roomOptions.reduce((sum, room) => sum + (roomHeatmap.get(`${room}:${day}`) ?? 0), 0)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </article>
           </div>
         </div>
       </section>
+      ) : null}
 
+      {activeStep === 3 ? (
       <section className="section-block">
         <div className="section-heading">
           <p className="section-kicker">Step 3</p>
@@ -1298,19 +2203,35 @@ function App() {
         </div>
 
         <article className="card">
-          <div className="card-toolbar">
-            <div>
-              <h3>Student timetable</h3>
-              <p className="muted-copy">Reserved external classes appear here.</p>
+            <div className="card-toolbar">
+              <div>
+                <h3>Student timetable</h3>
+                <p className="muted-copy">Reserved external classes appear here.</p>
+              </div>
+              <div className="toolbar-filters">
+                <label className="toolbar-field">
+                  Year
+                  <select value={selectedYearFilter} onChange={(event) => setSelectedYearFilter(event.target.value)}>
+                    <option value="all">All years</option>
+                    {yearOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                </label>
+                <label className="toolbar-field">
+                  Department
+                  <select value={selectedDepartmentFilter} onChange={(event) => setSelectedDepartmentFilter(event.target.value)}>
+                    <option value="all">All departments</option>
+                    {departmentOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                </label>
+                <label className="toolbar-field">
+                  Class view
+                  <select value={selectedClassId} onChange={(event) => setSelectedClassId(event.target.value)}>
+                    <option value="all">All classes</option>
+                    {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select>
+                </label>
+              </div>
             </div>
-            <label className="toolbar-field">
-              Class view
-              <select value={selectedClassId} onChange={(event) => setSelectedClassId(event.target.value)}>
-                <option value="all">All classes</option>
-                {data.classes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-              </select>
-            </label>
-          </div>
 
           <div className="timetable-stack">
             {visibleClasses.length ? visibleClasses.map((item) => (
@@ -1322,6 +2243,9 @@ function App() {
                 classLookup={classLookup}
                 subjectLookup={subjectLookup}
                 staffLookup={staffLookup}
+                onCellAction={(day, session) => addLockFromCell(item.id, day, session)}
+                isLocked={(day, session) => data.locks.some((lock) => lock.classId === item.id && lock.day === day && lock.session === session)}
+                lockActionDisabled={editDisabled}
               />
             )) : <EmptyPanel text="Add classes and generate timetable to view student schedules." />}
           </div>
@@ -1364,6 +2288,7 @@ function App() {
           ) : <EmptyPanel text="Add staff and select a faculty member to review the schedule." />}
         </article>
       </section>
+      ) : null}
     </div>
   );
 }
@@ -1388,7 +2313,7 @@ function MetricCard({ label, value }) {
   );
 }
 
-function SimpleList({ items, emptyText, onRemove }) {
+function SimpleList({ items, emptyText, onRemove, removeDisabled = false }) {
   if (!items.length) {
     return <p className="empty-text">{emptyText}</p>;
   }
@@ -1401,14 +2326,14 @@ function SimpleList({ items, emptyText, onRemove }) {
             <strong>{item.title}</strong>
             <span>{item.meta}</span>
           </div>
-          <button className="row-action" onClick={() => onRemove(item.id)}>Remove</button>
+          <button className="row-action" onClick={() => onRemove(item.id)} disabled={removeDisabled}>Remove</button>
         </div>
       ))}
     </div>
   );
 }
 
-function ReservationGrid({ selectedSlots, onToggle, disabled = false }) {
+function ReservationGrid({ selectedSlots, onToggle, onKeyDown, disabled = false, cellIdPrefix = 'grid' }) {
   const selected = new Set(selectedSlots.map((slot) => slotKey(slot.day, slot.session)));
 
   return (
@@ -1424,9 +2349,11 @@ function ReservationGrid({ selectedSlots, onToggle, disabled = false }) {
             return (
               <button
                 key={currentKey}
+                id={`${cellIdPrefix}-${day}-${session}`}
                 type="button"
                 className={`slot-toggle ${active ? 'active-slot' : ''}`}
                 onClick={() => onToggle(day, session)}
+                onKeyDown={onKeyDown ? (event) => onKeyDown(event, day, session) : undefined}
                 disabled={disabled}
               >
                 {active ? 'Reserved' : 'Open'}
@@ -1439,7 +2366,7 @@ function ReservationGrid({ selectedSlots, onToggle, disabled = false }) {
   );
 }
 
-function TimetableCard({ title, subtitle, getCell, classLookup, subjectLookup, staffLookup, mode = 'class' }) {
+function TimetableCard({ title, subtitle, getCell, classLookup, subjectLookup, staffLookup, mode = 'class', onCellAction = null, isLocked = null, lockActionDisabled = false }) {
   return (
     <article className="timetable-card">
       <div className="timetable-heading">
@@ -1473,20 +2400,44 @@ function TimetableCard({ title, subtitle, getCell, classLookup, subjectLookup, s
                   const member = cell?.staffId ? staffLookup.get(cell.staffId) : null;
                   const currentClass = cell?.classId ? classLookup.get(cell.classId) : null;
 
+                  const locked = isLocked ? isLocked(day, session) : false;
+
                   return (
                     <Fragment key={`${day}-${session}`}>
-                      <td>
+                      <td className={locked ? 'locked-cell' : ''}>
                         {cell?.kind === 'reserved' ? (
                           <div className="slot-card reserved-card">
                             <strong>{cell.subjectName ?? 'Reserved'}</strong>
                             <span>{cell.staffName ?? 'Blocked slot'}</span>
+                            {cell.roomName ? <span>Room: {cell.roomName}</span> : null}
+                          </div>
+                        ) : cell?.kind === 'locked' ? (
+                          <div className="slot-card locked-card">
+                            <strong>{subject?.shortName ?? '-'}</strong>
+                            <span>{mode === 'staff' ? currentClass?.label : member?.shortName}</span>
+                            {cell.roomName ? <span>Room: {cell.roomName}</span> : null}
+                            <span>Locked</span>
+                          </div>
+                        ) : cell?.kind === 'co-staff' ? (
+                          <div className="slot-card co-staff-card">
+                            <strong>{subject?.shortName ?? '-'}</strong>
+                            <span>{mode === 'staff' ? currentClass?.label : member?.shortName}</span>
+                            {cell.roomName ? <span>Room: {cell.roomName}</span> : null}
+                            <span>Co-staff</span>
                           </div>
                         ) : cell ? (
                           <div className="slot-card">
                             <strong>{subject?.shortName ?? '-'}</strong>
                             <span>{mode === 'staff' ? currentClass?.label : member?.shortName}</span>
+                            {cell.roomName ? <span>Room: {cell.roomName}</span> : null}
+                            {cell.coStaffIds?.length ? <span>Co: {cell.coStaffIds.length}</span> : null}
                           </div>
                         ) : <span className="empty-mark">-</span>}
+                        {onCellAction ? (
+                          <button className="cell-lock-button" onClick={() => onCellAction(day, session)} disabled={lockActionDisabled}>
+                            {locked ? 'Unlock' : 'Lock'}
+                          </button>
+                        ) : null}
                       </td>
                       {session === 3 ? <td className="break-cell">Tea Break</td> : null}
                     </Fragment>

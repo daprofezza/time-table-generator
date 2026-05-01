@@ -15,6 +15,10 @@ body {
   min-width: 320px;
 }
 
+body:has(.print-mode) {
+  background: #fff;
+}
+
 button,
 input,
 select {
@@ -111,6 +115,95 @@ h4 {
   gap: 12px;
   justify-content: flex-end;
   max-width: 420px;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.meta-chip {
+  background: #eef3fb;
+  color: #2f4d73;
+  border: 1px solid rgba(18, 32, 51, 0.08);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+}
+
+.sticky-actions {
+  position: sticky;
+  top: 8px;
+  z-index: 40;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(18, 32, 51, 0.08);
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(6px);
+}
+
+.sticky-left,
+.sticky-right,
+.toolbar-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.chip-button {
+  border: 1px solid rgba(18, 32, 51, 0.12);
+  border-radius: 999px;
+  background: #fff;
+  color: #234664;
+  padding: 8px 12px;
+}
+
+.active-chip {
+  background: #10396f;
+  color: #fff;
+  border-color: #10396f;
+}
+
+.toast-stack {
+  position: sticky;
+  top: 68px;
+  z-index: 45;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.toast-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(18, 32, 51, 0.12);
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.toast-success {
+  border-color: rgba(18, 102, 64, 0.25);
+  background: #ebfff6;
+}
+
+.toast-warn {
+  border-color: rgba(158, 106, 28, 0.25);
+  background: #fff8e8;
+}
+
+.toast-error {
+  border-color: rgba(138, 61, 59, 0.25);
+  background: #fff1f0;
 }
 
 .primary-button,
@@ -222,6 +315,18 @@ h4 {
 .week-card {
   display: grid;
   gap: 16px;
+}
+
+.settings-card,
+.explain-card {
+  margin-top: 16px;
+}
+
+.constraint-row {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .pill-row {
@@ -487,6 +592,23 @@ button:focus {
   min-width: 240px;
 }
 
+.heatmap-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.heatmap-cell {
+  border: 1px solid rgba(18, 32, 51, 0.08);
+  border-radius: 12px;
+  padding: 8px;
+  background: #f8fbff;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+}
+
 .issues-block {
   margin-top: 18px;
 }
@@ -579,6 +701,18 @@ button:focus {
   color: #8a4c1c;
 }
 
+.locked-card {
+  background: linear-gradient(180deg, #eef5ff 0%, #dde9ff 100%);
+  color: #1d3d6a;
+  border: 1px solid rgba(16, 57, 111, 0.22);
+}
+
+.co-staff-card {
+  background: linear-gradient(180deg, #effff4 0%, #dcf7e5 100%);
+  color: #1a5b3d;
+  border: 1px solid rgba(26, 91, 61, 0.22);
+}
+
 .slot-card span {
   font-size: 0.82rem;
 }
@@ -592,6 +726,92 @@ button:focus {
   border-radius: 18px;
   padding: 20px;
   background: #fafcff;
+}
+
+.locked-cell {
+  background: #f2f7ff;
+}
+
+.cell-lock-button {
+  margin-top: 6px;
+  border: 1px solid rgba(18, 32, 51, 0.12);
+  border-radius: 10px;
+  background: #fff;
+  padding: 4px 8px;
+  font-size: 0.74rem;
+  color: #3b5372;
+}
+
+.compact-density .hero-card,
+.compact-density .status-card,
+.compact-density .week-card,
+.compact-density .card {
+  padding: 16px;
+  border-radius: 16px;
+}
+
+.compact-density .timetable-grid td {
+  height: 64px;
+}
+
+.compact-density .slot-card {
+  padding: 6px 8px;
+}
+
+.compact-density .primary-button,
+.compact-density .secondary-button,
+.compact-density .ghost-button {
+  padding: 9px 12px;
+}
+
+.compact-density .metric-card strong {
+  font-size: 1.55rem;
+}
+
+.print-mode .sticky-actions,
+.print-mode .toast-stack,
+.print-mode .hero-actions,
+.print-mode .settings-card,
+.print-mode .explain-card,
+.print-mode .section-kicker,
+.print-mode .cell-lock-button,
+.print-mode .issues-block,
+.print-mode .table-wrap .row-action,
+.print-mode .history-card {
+  display: none !important;
+}
+
+@media print {
+  .sticky-actions,
+  .toast-stack,
+  .hero-actions,
+  .settings-card,
+  .explain-card,
+  .issues-block,
+  .history-card,
+  .row-action,
+  .cell-lock-button {
+    display: none !important;
+  }
+
+  .app-shell {
+    width: 100%;
+    padding: 0;
+  }
+
+  .hero-card,
+  .card,
+  .status-card,
+  .week-card,
+  .timetable-card {
+    box-shadow: none;
+    background: #fff;
+    border: 1px solid #dbe3ef;
+  }
+
+  .section-block {
+    page-break-inside: avoid;
+  }
 }
 
 button:disabled {
@@ -665,9 +885,23 @@ button:disabled {
     justify-items: start;
   }
 
+  .sticky-actions,
+  .constraint-row,
+  .toolbar-filters,
+  .heatmap-grid {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
   .primary-button,
   .secondary-button,
   .ghost-button {
     width: 100%;
+  }
+}
+
+@supports not selector(body:has(.print-mode)) {
+  body.print-mode-fallback {
+    background: #fff;
   }
 }
