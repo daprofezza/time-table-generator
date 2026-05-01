@@ -467,6 +467,7 @@ function App() {
   const [scheduleDirty, setScheduleDirty] = useState(false);
   const [cloudReady, setCloudReady] = useState(!HAS_FIREBASE_ENV ? false : null);
   const [printMode, setPrintMode] = useState(false);
+  const [printViewOnly, setPrintViewOnly] = useState(false);
   const [showDensityCompact, setShowDensityCompact] = useState(false);
   const [selectedYearFilter, setSelectedYearFilter] = useState('all');
   const [selectedDepartmentFilter, setSelectedDepartmentFilter] = useState('all');
@@ -1425,11 +1426,19 @@ function App() {
     if (typeof window === 'undefined') {
       return;
     }
+    if (!data.entries.length) {
+      setStatusMessage('Generate timetable before printing.');
+      pushToast('warn', 'No timetable entries to print.');
+      return;
+    }
+
+    setPrintViewOnly(true);
     setPrintMode(true);
     window.document.body.classList.add('print-mode-fallback');
     window.setTimeout(() => {
       window.print();
       setPrintMode(false);
+      setPrintViewOnly(false);
       window.document.body.classList.remove('print-mode-fallback');
     }, 80);
   }
@@ -1476,8 +1485,27 @@ function App() {
   const canOpenStep2 = stepReady.step1;
   const canOpenStep3 = stepReady.step2;
 
+  const printableClasses = useMemo(() => {
+    return [...data.classes].sort((left, right) => {
+      const yearOrder = { I: 1, II: 2, III: 3 };
+      const leftYear = yearOrder[left.year] ?? 99;
+      const rightYear = yearOrder[right.year] ?? 99;
+      if (leftYear !== rightYear) {
+        return leftYear - rightYear;
+      }
+      if (left.section !== right.section) {
+        return String(left.section).localeCompare(String(right.section));
+      }
+      return String(left.label).localeCompare(String(right.label));
+    });
+  }, [data.classes]);
+
+  const printableStaff = useMemo(() => {
+    return [...data.staff].sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  }, [data.staff]);
+
   return (
-    <div className={`app-shell ${showDensityCompact ? 'compact-density' : ''} ${printMode ? 'print-mode' : ''}`}>
+    <div className={`app-shell ${showDensityCompact ? 'compact-density' : ''} ${printMode ? 'print-mode' : ''} ${printViewOnly ? 'print-view-only' : ''}`}>
       <div className="sticky-actions">
         <div className="sticky-left">
           <button className={`chip-button ${activeStep === 1 ? 'active-chip' : ''}`} onClick={() => setActiveStep(1)}>
@@ -2289,6 +2317,57 @@ function App() {
         </article>
       </section>
       ) : null}
+
+      <section className="print-only-sheet">
+        <header className="print-sheet-header">
+          <h2>{data.settings.institution} - {data.settings.department}</h2>
+          <p>{data.settings.semester} | Shift II Timetable</p>
+        </header>
+
+        <article className="print-sheet-block">
+          <h3>Overall Student Timetable (All Years and Sections)</h3>
+          <div className="print-grid-stack">
+            {printableClasses.map((item) => (
+              <TimetableCard
+                key={`print-class-${item.id}`}
+                title={item.label}
+                subtitle="Student timetable"
+                getCell={(day, session) => classEntries.get(`${item.id}:${day}:${session}`) ?? null}
+                classLookup={classLookup}
+                subjectLookup={subjectLookup}
+                staffLookup={staffLookup}
+              />
+            ))}
+          </div>
+        </article>
+
+        <article className="print-sheet-block">
+          <h3>Individual Staff Timetable</h3>
+          <div className="print-grid-stack">
+            {printableStaff.map((member) => (
+              <TimetableCard
+                key={`print-staff-${member.id}`}
+                title={member.name}
+                subtitle={`${member.shortName} · ${(scheduledLoads.get(member.id) ?? 0) + (reservedCounts.get(member.id) ?? 0)} / ${member.maxHours} hours used`}
+                getCell={(day, session) => {
+                  const entry = staffEntries.get(`${member.id}:${day}:${session}`);
+                  if (entry) {
+                    return entry;
+                  }
+
+                  return reservedStaffLookup.has(`${member.id}:${day}:${session}`)
+                    ? { kind: 'reserved', day, session, subjectName: 'Reserved', staffName: 'Blocked slot' }
+                    : null;
+                }}
+                classLookup={classLookup}
+                subjectLookup={subjectLookup}
+                staffLookup={staffLookup}
+                mode="staff"
+              />
+            ))}
+          </div>
+        </article>
+      </section>
     </div>
   );
 }
